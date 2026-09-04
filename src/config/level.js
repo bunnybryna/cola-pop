@@ -37,6 +37,33 @@ export const TILE_TYPES = [
   },
 ];
 
+export const MASCOT_STATES = {
+  default: {
+    image: '/assets/mascot/default.png',
+    label: 'Cola sitting',
+  },
+  goodMatch: {
+    image: '/assets/mascot/good-match.png',
+    label: 'Cola excited',
+  },
+  bigCombo: {
+    image: '/assets/mascot/big-combo.png',
+    label: 'Cola jumping',
+  },
+  invalidSwap: {
+    image: '/assets/mascot/invalid-swap.png',
+    label: 'Cola tilting his head',
+  },
+  almostWinning: {
+    image: '/assets/mascot/almost-winning.png',
+    label: 'Cola ready to win',
+  },
+  victory: {
+    image: '/assets/mascot/victory.png',
+    label: 'Cola celebrating',
+  },
+};
+
 export const LEVEL_CONFIG = {
   level: 1,
   width: 8,
@@ -54,7 +81,9 @@ export const LEVEL_CONFIG = {
   timing: {
     swap: 170,
     invalidSwap: 260,
-    clear: 520,
+    clear: 700,
+    collectFly: 620,
+    victoryPause: 1350,
     fall: 320,
     cascadePause: 90,
   },

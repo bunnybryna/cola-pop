@@ -1,7 +1,7 @@
-import { RotateCcw, Trophy } from 'lucide-react';
-import { useMemo, useState } from 'react';
+import { PawPrint, RotateCcw } from 'lucide-react';
+import { useMemo, useRef, useState } from 'react';
 import { playSound } from './audio/sounds.js';
-import { LEVEL_CONFIG, TILE_TYPES } from './config/level.js';
+import { LEVEL_CONFIG, MASCOT_STATES, TILE_TYPES } from './config/level.js';
 import {
   applyGravityAndRefill,
   areAdjacent,
@@ -37,12 +37,23 @@ export default function App() {
   const [busy, setBusy] = useState(false);
   const [notice, setNotice] = useState('');
   const [matchFeedback, setMatchFeedback] = useState(null);
+  const [collectFlyers, setCollectFlyers] = useState([]);
+  const [progressPulseKey, setProgressPulseKey] = useState(0);
+  const [movesCallout, setMovesCallout] = useState(null);
+  const [mascotReaction, setMascotReaction] = useState(null);
+  const [victoryCelebration, setVictoryCelebration] = useState(false);
+  const [pawTaps, setPawTaps] = useState([]);
+  const tileRefs = useRef(new Map());
+  const goalTargetRef = useRef(null);
+  const mascotTimerRef = useRef(null);
 
   const tileLookup = useMemo(() => new Map(TILE_TYPES.map((tile) => [tile.id, tile])), []);
   const objectiveTiles = game.targetTiles.map((tileId) => tileLookup.get(tileId)).filter(Boolean);
   const objectiveTileSet = useMemo(() => new Set(game.targetTiles), [game.targetTiles]);
   const objectiveComplete = game.collected >= LEVEL_CONFIG.objective.targetCount;
-  const progress = Math.min(100, (game.collected / LEVEL_CONFIG.objective.targetCount) * 100);
+  const mascotState = getMascotState(game, mascotReaction);
+  const displayedCollected = Math.min(game.collected, LEVEL_CONFIG.objective.targetCount);
+  const progress = Math.min(100, (displayedCollected / LEVEL_CONFIG.objective.targetCount) * 100);
 
   async function handleTileClick(row, col) {
     if (busy || game.status !== 'playing') {
@@ -50,6 +61,7 @@ export default function App() {
     }
 
     const target = { row, col };
+    launchPawTap(target);
 
     if (!selected) {
       setSelected(target);
@@ -78,23 +90,31 @@ export default function App() {
     await sleep(LEVEL_CONFIG.timing.swap);
 
     const matches = findMatches(swapped, LEVEL_CONFIG);
+    const nextMoves = game.moves - 1;
+    if (nextMoves === 3) {
+      setMovesCallout({ key: Date.now(), text: '3 MOVES LEFT!' });
+    }
 
     if (matches.cells.length === 0) {
       playSound('invalid');
+      reactMascot('invalidSwap', 900);
       setGame((current) => ({
         ...current,
+        moves: nextMoves,
         board: markCells(swapped, [from, to], 'invalid'),
       }));
       await sleep(LEVEL_CONFIG.timing.invalidSwap);
+      const status = getStatus(game.collected, nextMoves);
       setGame((current) => ({
         ...current,
         board: resetTileStates(swapTiles(swapped, from, to)),
+        status,
+        message: getEndMessage(status),
       }));
       setBusy(false);
       return;
     }
 
-    const nextMoves = game.moves - 1;
     const resolved = await resolveMatches(swapped, {
       moves: nextMoves,
       score: game.score,
@@ -104,6 +124,24 @@ export default function App() {
     const status = getStatus(resolved.collected, nextMoves);
     if (status === 'won') {
       playSound('victory');
+      window.clearTimeout(mascotTimerRef.current);
+      setMascotReaction(null);
+      setVictoryCelebration(true);
+      setGame((current) => ({
+        ...current,
+        ...resolved,
+        moves: nextMoves,
+        status: 'celebrating',
+        message: getEndMessage(status),
+      }));
+      await sleep(LEVEL_CONFIG.timing.victoryPause);
+      setGame((current) => ({
+        ...current,
+        status,
+        message: getEndMessage(status),
+      }));
+      setBusy(false);
+      return;
     }
     setGame((current) => ({
       ...current,
@@ -130,15 +168,14 @@ export default function App() {
 
       const collection = getCollection(matches, board);
       const targetCollectionCount = getTargetCollectionCount(collection, objectiveTileSet);
-      collected += targetCollectionCount;
+      const nextCollected = collected + targetCollectionCount;
+      const targetCells = getTargetMatchedCells(matches, board, objectiveTileSet);
       score += scoreMatches(matches, LEVEL_CONFIG.scoring, cascadeIndex);
       const matchPower = getMatchPower(matches);
       const feedback = getMatchFeedback(matchPower, cascadeIndex);
 
       playSound(matchPower >= 4 || cascadeIndex > 0 ? 'special' : 'pop');
-      if (targetCollectionCount > 0) {
-        window.setTimeout(() => playSound('goal'), 110);
-      }
+      reactMascot(matchPower >= 4 || cascadeIndex > 0 ? 'bigCombo' : 'goodMatch', matchPower >= 4 ? 1200 : 850);
 
       if (feedback) {
         setMatchFeedback({ ...feedback, key: `${Date.now()}-${cascadeIndex}` });
@@ -148,9 +185,19 @@ export default function App() {
         ...current,
         board: markCells(board, matches.cells, 'clearing', { matchPower }),
         score,
-        collected,
       }));
-      await sleep(LEVEL_CONFIG.timing.clear);
+
+      if (targetCollectionCount > 0) {
+        launchCollectFlyers(targetCells, board);
+        await sleep(LEVEL_CONFIG.timing.collectFly);
+        collected = nextCollected;
+        playSound('goal');
+        setProgressPulseKey(Date.now());
+        setGame((current) => ({ ...current, collected }));
+        await sleep(Math.max(0, LEVEL_CONFIG.timing.clear - LEVEL_CONFIG.timing.collectFly));
+      } else {
+        await sleep(LEVEL_CONFIG.timing.clear);
+      }
 
       board = applyGravityAndRefill(clearCells(board, matches.cells), LEVEL_CONFIG, TILE_TYPES);
       playSound('fall');
@@ -184,25 +231,106 @@ export default function App() {
     setBusy(false);
     setNotice('');
     setMatchFeedback(null);
+    setCollectFlyers([]);
+    setProgressPulseKey(0);
+    setMovesCallout(null);
+    setMascotReaction(null);
+    setVictoryCelebration(false);
+    setPawTaps([]);
+    window.clearTimeout(mascotTimerRef.current);
+    tileRefs.current.clear();
+  }
+
+  function launchPawTap(cell) {
+    const sourceRect = tileRefs.current.get(`${cell.row}:${cell.col}`)?.getBoundingClientRect();
+
+    if (!sourceRect) {
+      return;
+    }
+
+    const tap = {
+      id: `${Date.now()}-${cell.row}-${cell.col}`,
+      x: sourceRect.left + sourceRect.width / 2,
+      y: sourceRect.top + sourceRect.height / 2,
+    };
+
+    setPawTaps((current) => [...current.slice(-5), tap]);
+    window.setTimeout(() => {
+      setPawTaps((current) => current.filter((item) => item.id !== tap.id));
+    }, 920);
+  }
+
+  function reactMascot(reaction, duration) {
+    window.clearTimeout(mascotTimerRef.current);
+    setMascotReaction(reaction);
+    mascotTimerRef.current = window.setTimeout(() => setMascotReaction(null), duration);
+  }
+
+  function launchCollectFlyers(cells, boardSnapshot) {
+    const targetRect = goalTargetRef.current?.getBoundingClientRect();
+
+    if (!targetRect) {
+      return;
+    }
+
+    const targetX = targetRect.left + targetRect.width / 2;
+    const targetY = targetRect.top + targetRect.height / 2;
+    const flyers = cells
+      .map((cell, index) => {
+        const sourceRect = tileRefs.current.get(`${cell.row}:${cell.col}`)?.getBoundingClientRect();
+        const tile = boardSnapshot[cell.row]?.[cell.col];
+        const meta = tileLookup.get(tile?.type);
+
+        if (!sourceRect || !meta) {
+          return null;
+        }
+
+        const fromX = sourceRect.left + sourceRect.width / 2;
+        const fromY = sourceRect.top + sourceRect.height / 2;
+
+        return {
+          id: `${tile.key}-fly-${index}`,
+          image: meta.image,
+          label: meta.label,
+          fromX,
+          fromY,
+          dx: targetX - fromX,
+          dy: targetY - fromY,
+          delay: Math.min(index * 45, 180),
+        };
+      })
+      .filter(Boolean);
+
+    setCollectFlyers(flyers);
+    window.setTimeout(() => setCollectFlyers([]), LEVEL_CONFIG.timing.collectFly + 180);
   }
 
   return (
     <main className="game-shell">
       <section className="topbar" aria-label="Level status">
-        <div>
+        <div className="brand-lockup">
+          <div>
           <p className="eyebrow">Level {LEVEL_CONFIG.level}</p>
           <h1 className="game-title" aria-label="COLA POP!">
-            <span>COLA</span>
+            <span className="cola-word">
+              <span>C</span>
+              <span>O</span>
+              <span>L</span>
+              <span>A</span>
+            </span>
             <span className="pop-word">
-              P<span className="paw-o" aria-hidden="true">
+              <span>P</span>
+              <span className="paw-o" aria-hidden="true">
                 <span className="paw-pad" />
                 <span className="paw-toe toe-one" />
                 <span className="paw-toe toe-two" />
                 <span className="paw-toe toe-three" />
               </span>
-              P!
+              <span>P</span>
+              <span>!</span>
             </span>
           </h1>
+          </div>
         </div>
         <button className="icon-button" type="button" onClick={restart} aria-label="Restart level" title="Restart">
           <RotateCcw size={22} />
@@ -211,16 +339,22 @@ export default function App() {
 
       <section className="game-layout">
         <aside className="status-panel" aria-label="Moves and objective">
-          <div className="stat-row">
-            <span>Moves</span>
+          <div className={`stat-row moves-card ${getMovesTone(game.moves)}`} key={`moves-${game.moves}`}>
+            <span className="panel-label">
+              <PawPrint size={16} aria-hidden="true" />
+              Moves
+            </span>
             <strong>{game.moves}</strong>
           </div>
 
           <div className="objective">
             <div className="objective-heading">
-              <span>Goal</span>
+              <span className="panel-label">
+                <PawPrint size={16} aria-hidden="true" />
+                Cola's Favorites
+              </span>
             </div>
-            <div className="goal-progress">
+            <div className="goal-progress" ref={goalTargetRef}>
               <div className="goal-tiles" aria-label="Target Cola tiles">
                 {objectiveTiles.map((tile) => (
                   <div className="goal-tile" key={tile.id}>
@@ -229,18 +363,29 @@ export default function App() {
                 ))}
               </div>
               <strong>
-                {game.collected} / {LEVEL_CONFIG.objective.targetCount}
+                {displayedCollected} / {LEVEL_CONFIG.objective.targetCount}
+                {objectiveComplete && (
+                  <span className="goal-check" aria-label="complete">
+                    ✓
+                  </span>
+                )}
               </strong>
             </div>
-            <div className="progress-track" aria-hidden="true">
+            <div className={`progress-track ${progressPulseKey ? 'pulse' : ''}`} key={progressPulseKey} aria-hidden="true">
               <div className="progress-fill" style={{ width: `${progress}%` }} />
+            </div>
+          </div>
+
+          <div className="mascot-panel" aria-live="polite">
+            <div className={`mascot mascot-${mascotState.key}`} key={mascotState.key}>
+              <img src={mascotState.image} alt={mascotState.label} />
             </div>
           </div>
 
           {notice && <div className="notice">{notice}</div>}
         </aside>
 
-        <section className="board-wrap" aria-label="Cola Match board">
+        <section className={`board-wrap ${victoryCelebration ? 'victory-board' : ''}`} aria-label="Cola Match board">
           <div className="board" style={{ '--board-size': LEVEL_CONFIG.width }}>
             {game.board.map((row, rowIndex) =>
               row.map((tile, colIndex) => {
@@ -253,6 +398,14 @@ export default function App() {
                       tile.matchPower ? `match-${tile.matchPower}` : ''
                     }`}
                     key={tile.key}
+                    ref={(node) => {
+                      const cellKey = `${rowIndex}:${colIndex}`;
+                      if (node) {
+                        tileRefs.current.set(cellKey, node);
+                      } else {
+                        tileRefs.current.delete(cellKey);
+                      }
+                    }}
                     type="button"
                     onClick={() => handleTileClick(rowIndex, colIndex)}
                     style={{ '--tile-color': meta.color }}
@@ -276,18 +429,44 @@ export default function App() {
         </section>
       </section>
 
-      {game.status !== 'playing' && (
+      {(game.status === 'won' || game.status === 'lost') && (
         <div className="overlay" role="dialog" aria-modal="true" aria-labelledby="result-title">
-          <div className="result-card">
-            <Trophy size={42} aria-hidden="true" />
-            <p className="eyebrow">{game.status === 'won' ? 'Sweet victory' : 'Try again'}</p>
-            <h2 id="result-title">{game.message}</h2>
-            <button className="primary-button" type="button" onClick={restart}>
-              Play Again
-            </button>
-          </div>
+          {game.status === 'won' ? (
+            <div className="result-card victory-card">
+              <p className="victory-kicker" aria-hidden="true">
+                🎉
+              </p>
+              <h2 id="result-title">PAWSOME!</h2>
+              <p>Cola is very happy!</p>
+              <img className="victory-mascot" src={MASCOT_STATES.victory.image} alt={MASCOT_STATES.victory.label} />
+              <p>You completed Level {LEVEL_CONFIG.level}</p>
+              <p className="moves-left">Moves left: {game.moves}</p>
+              <button className="primary-button" type="button" onClick={restart}>
+                Play Again
+              </button>
+            </div>
+          ) : (
+            <div className="result-card lose-card">
+              <PawPrint size={34} aria-hidden="true" />
+              <h2 id="result-title">SO CLOSE!</h2>
+              <p>Cola wants to try again.</p>
+              <img
+                className="lose-mascot"
+                src="/assets/tiles/sleepy.png"
+                alt="Sleepy Cola"
+              />
+              <p className="collected-summary">
+                {displayedCollected} / {LEVEL_CONFIG.objective.targetCount} collected
+              </p>
+              <button className="primary-button" type="button" onClick={restart}>
+                Try Again
+              </button>
+            </div>
+          )}
         </div>
       )}
+
+      {victoryCelebration && <VictoryBurst />}
 
       {matchFeedback && (
         <div className={`match-callout ${matchFeedback.tone}`} key={matchFeedback.key} aria-live="polite">
@@ -295,8 +474,63 @@ export default function App() {
         </div>
       )}
 
+      {movesCallout && (
+        <div className="moves-callout" key={movesCallout.key} aria-live="polite">
+          {movesCallout.text}
+        </div>
+      )}
+
+      {collectFlyers.map((flyer) => (
+        <img
+          className="collect-flyer"
+          key={flyer.id}
+          src={flyer.image}
+          alt=""
+          style={{
+            left: `${flyer.fromX}px`,
+            top: `${flyer.fromY}px`,
+            '--fly-x': `${flyer.dx}px`,
+            '--fly-y': `${flyer.dy}px`,
+            '--fly-mid-x': `${flyer.dx * 0.88}px`,
+            '--fly-mid-y': `${flyer.dy * 0.88 - 20}px`,
+            animationDelay: `${flyer.delay}ms`,
+          }}
+        />
+      ))}
+
+      {pawTaps.map((tap) => (
+        <span
+          className="paw-tap"
+          key={tap.id}
+          aria-hidden="true"
+          style={{
+            left: `${tap.x}px`,
+            top: `${tap.y}px`,
+          }}
+        />
+      ))}
+
       <div className={`completion-spark ${objectiveComplete ? 'show' : ''}`}>Goal complete</div>
     </main>
+  );
+}
+
+function VictoryBurst() {
+  return (
+    <div className="victory-burst" aria-hidden="true">
+      {Array.from({ length: 24 }, (_, index) => (
+        <span
+          className={index % 3 === 0 ? 'victory-paw' : 'victory-confetti'}
+          key={index}
+          style={{
+            '--x': `${8 + ((index * 37) % 86)}vw`,
+            '--delay': `${(index % 8) * 95}ms`,
+            '--drift': `${index % 2 === 0 ? -18 : 18}px`,
+            '--spin': `${index % 2 === 0 ? -18 : 18}deg`,
+          }}
+        />
+      ))}
+    </div>
   );
 }
 
@@ -310,6 +544,38 @@ function getStatus(collected, moves) {
   }
 
   return 'playing';
+}
+
+function getMovesTone(moves) {
+  if (moves <= 1) {
+    return 'moves-critical';
+  }
+
+  if (moves <= 12) {
+    return 'moves-low';
+  }
+
+  return '';
+}
+
+function getMascotState(game, reaction) {
+  if (game.status === 'won' || game.status === 'celebrating') {
+    return { key: 'victory', ...MASCOT_STATES.victory };
+  }
+
+  if (reaction) {
+    return { key: reaction, ...MASCOT_STATES[reaction] };
+  }
+
+  if (isAlmostWinning(game.collected)) {
+    return { key: 'almostWinning', ...MASCOT_STATES.almostWinning };
+  }
+
+  return { key: 'default', ...MASCOT_STATES.default };
+}
+
+function isAlmostWinning(collected) {
+  return collected >= Math.ceil(LEVEL_CONFIG.objective.targetCount * 0.75);
 }
 
 function pickRandomTargetTiles(tileTypes, count) {
@@ -350,6 +616,13 @@ function getMatchFeedback(matchPower, cascadeIndex) {
   }
 
   return null;
+}
+
+function getTargetMatchedCells(matches, board, targetTiles) {
+  return matches.cells.filter((cell) => {
+    const tile = board[cell.row]?.[cell.col];
+    return tile && targetTiles.has(tile.type);
+  });
 }
 
 function getTargetCollectionCount(collection, targetTiles) {
