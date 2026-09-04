@@ -562,7 +562,7 @@ h2 {
   pointer-events: none;
   text-shadow: 0 2px 0 rgba(255, 255, 255, 0.8);
   transform: translate(-50%, -50%);
-  animation: callout-pop 820ms ease-out both;
+  animation: callout-pop 1450ms ease-out both;
 }
 
 .match-callout.nice {
@@ -734,11 +734,13 @@ h2 {
     opacity: 0;
     transform: translate(-50%, -42%) scale(0.62) rotate(-3deg);
   }
-  18% {
+  12% {
     opacity: 1;
     transform: translate(-50%, -50%) scale(1.12) rotate(1deg);
   }
-  44% {
+  24%,
+  72% {
+    opacity: 1;
     transform: translate(-50%, -54%) scale(1) rotate(0deg);
   }
   100% {
