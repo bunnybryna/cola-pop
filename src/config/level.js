@@ -64,8 +64,27 @@ export const MASCOT_STATES = {
   },
 };
 
-export const LEVEL_CONFIG = {
+const SHARED_SCORING = {
+  basePerTile: 10,
+  extraMatchTileBonus: 15,
+  cascadeBonus: 40,
+};
+
+const SHARED_TIMING = {
+  swap: 170,
+  invalidSwap: 260,
+  clear: 700,
+  collectFly: 620,
+  victoryPause: 1350,
+  fall: 320,
+  cascadePause: 90,
+};
+
+export const LEVELS = [
+  {
   level: 1,
+  name: 'A Walk in the Park',
+  goalType: 'collectTiles',
   width: 8,
   height: 8,
   moveLimit: 24,
@@ -73,18 +92,47 @@ export const LEVEL_CONFIG = {
     targetTileCount: 3,
     targetCount: 24,
   },
-  scoring: {
-    basePerTile: 10,
-    extraMatchTileBonus: 15,
-    cascadeBonus: 40,
+  story: {
+    headline: 'The park is in bloom! 🌸',
+    prompt: 'Match the three flower-colored Colas and collect',
+    favoriteLead: 'Cola has favorites!',
+    favoriteDetail: 'Match any color you like, but only these three count.',
   },
-  timing: {
-    swap: 170,
-    invalidSwap: 260,
-    clear: 700,
-    collectFly: 620,
-    victoryPause: 1350,
-    fall: 320,
-    cascadePause: 90,
+  boardObjects: [],
+  scoring: SHARED_SCORING,
+  timing: SHARED_TIMING,
   },
-};
+  {
+    level: 2,
+    name: 'Treat Time 🦴',
+    goalType: 'collectTreats',
+    width: 8,
+    height: 8,
+    moveLimit: 20,
+    objective: {
+      treatType: 'bone',
+      treatCount: 6,
+    },
+    story: {
+      headline: 'Cola is getting hungry! 🦴',
+      prompt: 'Make matches next to treats to collect them all.',
+      favoriteLead: 'One match can grab more than one treat!',
+      favoriteDetail: '',
+    },
+    boardObjects: [
+      {
+        id: 'bone',
+        label: 'Bone Treat',
+        image: '/assets/tiles/bone.png',
+        count: 6,
+        placement: {
+          area: 'inner',
+        },
+      },
+    ],
+    scoring: SHARED_SCORING,
+    timing: SHARED_TIMING,
+  },
+];
+
+export const LEVEL_CONFIG = LEVELS[0];
