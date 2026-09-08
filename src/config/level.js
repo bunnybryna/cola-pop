@@ -90,7 +90,7 @@ export const LEVELS = [
   moveLimit: 24,
   objective: {
     targetTileCount: 3,
-      targetCount: 3,
+      targetCount: 24,
   },
   story: {
     headline: 'The park is in bloom! 🌸',
