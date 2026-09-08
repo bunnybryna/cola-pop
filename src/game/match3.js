@@ -41,7 +41,13 @@ export function createBoardWithoutMatches(config, tileTypes) {
     board.push(boardRow);
   }
 
-  return placeBoardObjects(board, config);
+  const boardWithObjects = placeBoardObjects(board, config);
+
+  if (!boardWithObjects) {
+    return null;
+  }
+
+  return placeTerrain(boardWithObjects, config);
 }
 
 export function createRandomTile(tileTypes, blocked = new Set()) {
@@ -187,8 +193,50 @@ export function findAdjacentObjects(matches, board, config, objectType) {
   return [...found.values()];
 }
 
+export function findMatchedTerrain(matches, board, terrainType) {
+  const found = new Map();
+
+  for (const cell of matches.cells) {
+    const terrain = board[cell.row]?.[cell.col]?.terrain;
+
+    if (terrain?.type === terrainType && terrain.state !== 'clean') {
+      found.set(makeCellKey(cell), cell);
+    }
+  }
+
+  return [...found.values()];
+}
+
+export function markTerrain(board, cells, state, extra = {}) {
+  const marked = cloneBoard(board);
+
+  for (const cell of cells) {
+    if (marked[cell.row]?.[cell.col]?.terrain) {
+      marked[cell.row][cell.col].terrain = {
+        ...marked[cell.row][cell.col].terrain,
+        state,
+        ...extra,
+      };
+    }
+  }
+
+  return marked;
+}
+
+export function clearTerrain(board, cells) {
+  const next = cloneBoard(board);
+
+  for (const cell of cells) {
+    if (next[cell.row]?.[cell.col]) {
+      next[cell.row][cell.col].terrain = null;
+    }
+  }
+
+  return next;
+}
+
 export function applyGravityAndRefill(board, config, tileTypes) {
-  const next = board.map((row) => row.map((cell) => createCell(null, cell.object)));
+  const next = board.map((row) => row.map((cell) => createCell(null, cell.object, cell.terrain)));
 
   for (let col = 0; col < config.width; col += 1) {
     let segmentBottom = config.height - 1;
@@ -284,8 +332,8 @@ export function reshuffleBoard(board, config, tileTypes) {
     shuffled = board.map((row) =>
       row.map((cell) =>
         getCellTile(cell)
-          ? createCell(pool.splice(Math.floor(Math.random() * pool.length), 1)[0], cell.object)
-          : createCell(null, cell.object),
+          ? createCell(pool.splice(Math.floor(Math.random() * pool.length), 1)[0], cell.object, cell.terrain)
+          : createCell(null, cell.object, cell.terrain),
       ),
     );
 
@@ -372,6 +420,87 @@ function placeBoardObjects(board, config) {
   return next;
 }
 
+function placeTerrain(board, config) {
+  const terrainConfigs = config.terrain ?? [];
+
+  if (terrainConfigs.length === 0) {
+    return board;
+  }
+
+  const next = cloneBoard(board);
+  const occupied = new Set();
+  const rowCounts = new Map();
+  const colCounts = new Map();
+
+  for (const terrainConfig of terrainConfigs) {
+    let candidates = getTerrainPlacementCandidates(next, config, terrainConfig);
+    let placedForTerrain = 0;
+    const adjacentPairCount = terrainConfig.placement?.adjacentPairCount ?? 0;
+
+    for (
+      let pairIndex = 0;
+      pairIndex < adjacentPairCount && placedForTerrain + 1 < terrainConfig.count;
+      pairIndex += 1
+    ) {
+      const pairCandidates = getTerrainPairCandidates(candidates, next, terrainConfig).filter((pair) =>
+        pair.every(
+          (cell) =>
+            !occupied.has(makeCellKey(cell)) &&
+            isWithinTerrainSpreadLimits(cell, terrainConfig, rowCounts, colCounts),
+        ),
+      );
+
+      if (pairCandidates.length === 0) {
+        break;
+      }
+
+      const pair = pairCandidates[Math.floor(Math.random() * pairCandidates.length)];
+
+      for (const cell of pair) {
+        placeTerrainCell(next, cell, terrainConfig, occupied, rowCounts, colCounts);
+        placedForTerrain += 1;
+      }
+
+      candidates = candidates.filter((cell) => !occupied.has(makeCellKey(cell)));
+    }
+
+    while (placedForTerrain < terrainConfig.count && candidates.length > 0) {
+      const validCandidates = candidates.filter(
+        (cell) =>
+          !occupied.has(makeCellKey(cell)) &&
+          isWithinTerrainSpreadLimits(cell, terrainConfig, rowCounts, colCounts),
+      );
+
+      if (validCandidates.length === 0) {
+        break;
+      }
+
+      candidates = validCandidates;
+      const candidateIndex = Math.floor(Math.random() * candidates.length);
+      const placedCell = candidates.splice(candidateIndex, 1)[0];
+      placeTerrainCell(next, placedCell, terrainConfig, occupied, rowCounts, colCounts);
+      placedForTerrain += 1;
+    }
+
+    if (placedForTerrain < terrainConfig.count) {
+      return null;
+    }
+  }
+
+  return next;
+}
+
+function placeTerrainCell(board, cell, terrainConfig, occupied, rowCounts, colCounts) {
+  occupied.add(makeCellKey(cell));
+  rowCounts.set(cell.row, (rowCounts.get(cell.row) ?? 0) + 1);
+  colCounts.set(cell.col, (colCounts.get(cell.col) ?? 0) + 1);
+
+  board[cell.row][cell.col].terrain = {
+    type: terrainConfig.id,
+    state: 'dirty',
+  };
+}
+
 function makeBoardFromObjectLayout(sourceBoard, config, tileTypes) {
   let fallback;
 
@@ -383,9 +512,10 @@ function makeBoardFromObjectLayout(sourceBoard, config, tileTypes) {
 
       for (let col = 0; col < config.width; col += 1) {
         const object = sourceBoard[row]?.[col]?.object;
+        const terrain = sourceBoard[row]?.[col]?.terrain;
 
         if (object) {
-          boardRow.push(createCell(null, { ...object }));
+          boardRow.push(createCell(null, { ...object }, terrain ? { ...terrain } : null));
           continue;
         }
 
@@ -403,7 +533,7 @@ function makeBoardFromObjectLayout(sourceBoard, config, tileTypes) {
           blocked.add(aboveOne.type);
         }
 
-        boardRow.push(createCell(createRandomTile(tileTypes, blocked)));
+        boardRow.push(createCell(createRandomTile(tileTypes, blocked), null, terrain ? { ...terrain } : null));
       }
 
       board.push(boardRow);
@@ -499,6 +629,88 @@ function getObjectDistance(a, b, objectConfig) {
   return Math.abs(a.row - b.row) + Math.abs(a.col - b.col);
 }
 
+function getTerrainPlacementCandidates(board, config, terrainConfig) {
+  const candidates = [];
+
+  for (let row = 0; row < config.height; row += 1) {
+    for (let col = 0; col < config.width; col += 1) {
+      const cell = { row, col };
+
+      if (isTerrainPlacementCell(board, cell, config, terrainConfig)) {
+        candidates.push(cell);
+      }
+    }
+  }
+
+  return candidates;
+}
+
+function getTerrainPairCandidates(candidates, board, terrainConfig) {
+  const candidateKeys = new Set(candidates.map(makeCellKey));
+  const direction = terrainConfig.placement?.adjacentPairDirection ?? 'horizontal';
+  const offsets =
+    direction === 'vertical'
+      ? [{ row: 1, col: 0 }]
+      : direction === 'either'
+        ? [
+            { row: 0, col: 1 },
+            { row: 1, col: 0 },
+          ]
+        : [{ row: 0, col: 1 }];
+
+  const pairs = [];
+
+  for (const cell of candidates) {
+    for (const offset of offsets) {
+      const pairedCell = {
+        row: cell.row + offset.row,
+        col: cell.col + offset.col,
+      };
+
+      if (!candidateKeys.has(makeCellKey(pairedCell))) {
+        continue;
+      }
+
+      pairs.push([cell, pairedCell]);
+    }
+  }
+
+  if (!terrainConfig.placement?.preferSameTilePair) {
+    return pairs;
+  }
+
+  const sameTilePairs = pairs.filter(([first, second]) => {
+    const firstType = board[first.row]?.[first.col]?.tile?.type;
+    const secondType = board[second.row]?.[second.col]?.tile?.type;
+
+    return firstType && firstType === secondType;
+  });
+
+  return sameTilePairs.length > 0 ? sameTilePairs : pairs;
+}
+
+function isTerrainPlacementCell(board, cell, config, terrainConfig) {
+  const borderPadding = terrainConfig.placement?.borderPadding ?? 0;
+  const boardCell = board[cell.row]?.[cell.col];
+
+  return (
+    cell.row >= borderPadding &&
+    cell.row <= config.height - borderPadding - 1 &&
+    cell.col >= borderPadding &&
+    cell.col <= config.width - borderPadding - 1 &&
+    Boolean(boardCell?.tile) &&
+    !boardCell.object &&
+    !boardCell.terrain
+  );
+}
+
+function isWithinTerrainSpreadLimits(cell, terrainConfig, rowCounts, colCounts) {
+  const maxPerRow = terrainConfig.placement?.maxPerRow ?? Infinity;
+  const maxPerColumn = terrainConfig.placement?.maxPerColumn ?? Infinity;
+
+  return (rowCounts.get(cell.row) ?? 0) < maxPerRow && (colCounts.get(cell.col) ?? 0) < maxPerColumn;
+}
+
 function pushMatch(run, board, matched, groups) {
   if (run.length < 3) {
     return;
@@ -544,15 +756,17 @@ function cloneBoard(board) {
       createCell(
         cell.tile ? { ...cell.tile } : null,
         cell.object ? { ...cell.object } : null,
+        cell.terrain ? { ...cell.terrain } : null,
       ),
     ),
   );
 }
 
-function createCell(tile = null, object = null) {
+function createCell(tile = null, object = null, terrain = null) {
   return {
     tile,
     object,
+    terrain,
   };
 }
 

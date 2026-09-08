@@ -8,13 +8,16 @@ import {
   canSwapCells,
   clearCells,
   clearObjects,
+  clearTerrain,
   findAdjacentObjects,
+  findMatchedTerrain,
   findMatches,
   getCollection,
   hasPossibleMove,
   makeInitialBoard,
   markCells,
   markObjects,
+  markTerrain,
   resetTileStates,
   reshuffleBoard,
   scoreMatches,
@@ -61,11 +64,16 @@ export default function App() {
     [levelConfig],
   );
   const isTreatGoal = levelConfig.goalType === 'collectTreats';
+  const isMudGoal = levelConfig.goalType === 'clearMud';
   const objectiveObject = isTreatGoal ? objectLookup.get(levelConfig.objective.treatType) : null;
+  const objectiveTerrain = isMudGoal
+    ? (levelConfig.terrain ?? []).find((terrain) => terrain.id === levelConfig.objective.terrainType)
+    : null;
   const objectiveTiles = game.targetTiles.map((tileId) => tileLookup.get(tileId)).filter(Boolean);
   const objectiveTileSet = useMemo(() => new Set(game.targetTiles), [game.targetTiles]);
   const objectiveTarget = getObjectiveTarget(levelConfig);
-  const objectiveNoun = isTreatGoal ? 'treats' : 'Colas';
+  const objectiveNoun = getObjectiveNoun(levelConfig);
+  const objectiveVerb = getObjectiveVerb(levelConfig);
   const objectiveComplete = game.collected >= objectiveTarget;
   const mascotState = getMascotState(game, mascotReaction, levelConfig);
   const displayedCollected = Math.min(game.collected, objectiveTarget);
@@ -75,6 +83,10 @@ export default function App() {
     levelConfig.goalType === 'collectTiles' ? (
       <>
         {levelConfig.story.prompt} <strong>{objectiveTarget}</strong>.
+      </>
+    ) : levelConfig.goalType === 'clearMud' ? (
+      <>
+        Match <strong>on muddy spots</strong> to clean them.
       </>
     ) : (
       levelConfig.story.prompt
@@ -196,32 +208,51 @@ export default function App() {
 
       const collection = getCollection(matches, board);
       const treatCells =
-        levelConfig.goalType === 'collectTreats'
+        isTreatGoal
           ? findAdjacentObjects(matches, board, levelConfig, levelConfig.objective.treatType)
           : [];
+      const mudCells = isMudGoal ? findMatchedTerrain(matches, board, levelConfig.objective.terrainType) : [];
       const targetCollectionCount =
-        levelConfig.goalType === 'collectTreats'
+        isTreatGoal
           ? treatCells.length
-          : getTargetCollectionCount(collection, objectiveTileSet);
+          : isMudGoal
+            ? mudCells.length
+            : getTargetCollectionCount(collection, objectiveTileSet);
       const nextCollected = collected + targetCollectionCount;
       const targetCells =
-        levelConfig.goalType === 'collectTreats'
+        isTreatGoal
           ? treatCells
-          : getTargetMatchedCells(matches, board, objectiveTileSet);
+          : isMudGoal
+            ? mudCells
+            : getTargetMatchedCells(matches, board, objectiveTileSet);
       score += scoreMatches(matches, levelConfig.scoring, cascadeIndex);
       const matchPower = getMatchPower(matches);
       const feedback =
-        targetCollectionCount > 0 && levelConfig.goalType === 'collectTreats'
+        targetCollectionCount > 0 && isTreatGoal
           ? getTreatFeedback(targetCollectionCount, cascadeIndex)
+          : targetCollectionCount > 1 && isMudGoal
+            ? getMudFeedback(targetCollectionCount, cascadeIndex, nextCollected, objectiveTarget)
+          : targetCollectionCount > 0 && isMudGoal && nextCollected >= objectiveTarget
+            ? getMudFeedback(targetCollectionCount, cascadeIndex, nextCollected, objectiveTarget)
           : getMatchFeedback(matchPower, cascadeIndex);
 
       playSound(matchPower >= 4 || cascadeIndex > 0 ? 'special' : 'pop');
 
-      if (levelConfig.goalType === 'collectTreats') {
+      if (isTreatGoal) {
         if (targetCollectionCount > 1 || (targetCollectionCount > 0 && cascadeIndex > 0)) {
           reactMascot('bigCombo', 1200);
         } else if (targetCollectionCount === 1) {
           reactMascot('almostWinning', 1050);
+        }
+      } else if (isMudGoal) {
+        if (nextCollected >= objectiveTarget) {
+          reactMascot('victory', levelConfig.timing.victoryPause);
+        } else if (nextCollected >= objectiveTarget - 1 && targetCollectionCount > 0) {
+          reactMascot('almostWinning', 1200);
+        } else if (targetCollectionCount > 1 || (targetCollectionCount > 0 && cascadeIndex > 0)) {
+          reactMascot('bigCombo', 1200);
+        } else if (targetCollectionCount === 1) {
+          reactMascot('goodMatch', 900);
         }
       } else {
         reactMascot(matchPower >= 4 || cascadeIndex > 0 ? 'bigCombo' : 'goodMatch', matchPower >= 4 ? 1200 : 850);
@@ -232,9 +263,13 @@ export default function App() {
       }
 
       const markedBoard = markCells(
-        targetCollectionCount > 0 && levelConfig.goalType === 'collectTreats'
-          ? markObjects(board, treatCells, 'collecting')
-          : board,
+        getMarkedObjectiveBoard(board, {
+          isTreatGoal,
+          isMudGoal,
+          targetCollectionCount,
+          treatCells,
+          mudCells,
+        }),
         matches.cells,
         'clearing',
         { matchPower },
@@ -247,23 +282,31 @@ export default function App() {
       }));
 
       if (targetCollectionCount > 0) {
-        if (levelConfig.goalType === 'collectTreats') {
+        if (isTreatGoal) {
           await sleep(180);
         }
 
-        launchCollectFlyers(targetCells, board);
-        await sleep(levelConfig.timing.collectFly);
+        if (!isMudGoal) {
+          launchCollectFlyers(targetCells, board);
+        }
+
+        await sleep(isMudGoal ? Math.min(420, levelConfig.timing.clear) : levelConfig.timing.collectFly);
         collected = nextCollected;
         playSound('goal');
         setProgressPulseKey(Date.now());
         setGame((current) => ({ ...current, collected }));
-        await sleep(Math.max(0, levelConfig.timing.clear - levelConfig.timing.collectFly));
+        await sleep(isMudGoal ? 80 : Math.max(0, levelConfig.timing.clear - levelConfig.timing.collectFly));
       } else {
         await sleep(levelConfig.timing.clear);
       }
 
       const clearedBoard = clearCells(
-        levelConfig.goalType === 'collectTreats' ? clearObjects(board, treatCells) : board,
+        getClearedObjectiveBoard(board, {
+          isTreatGoal,
+          isMudGoal,
+          treatCells,
+          mudCells,
+        }),
         matches.cells,
       );
       board = applyGravityAndRefill(clearedBoard, levelConfig, TILE_TYPES);
@@ -423,15 +466,23 @@ export default function App() {
             <div className="objective-heading">
               <span className="panel-label">
                 <PawPrint size={16} aria-hidden="true" />
-                {isTreatGoal ? 'Goal' : "Cola's Favorites"}
+                {isTreatGoal || isMudGoal ? 'Goal' : "Cola's Favorites"}
               </span>
             </div>
-            <div className={`goal-progress ${isTreatGoal ? 'treat-goal-progress' : ''}`} ref={goalTargetRef}>
+            <div className={`goal-progress ${isTreatGoal || isMudGoal ? 'treat-goal-progress' : ''}`} ref={goalTargetRef}>
               {isTreatGoal ? (
                 objectiveObject && (
                   <div className="goal-tiles" aria-label="Target treat">
                     <div className="goal-tile treat-goal-tile">
                       <img src={objectiveObject.image} alt={objectiveObject.label} />
+                    </div>
+                  </div>
+                )
+              ) : isMudGoal ? (
+                objectiveTerrain && (
+                  <div className="goal-tiles" aria-label="Target muddy spots">
+                    <div className="goal-tile treat-goal-tile">
+                      <img src={objectiveTerrain.identityImage} alt={objectiveTerrain.label} />
                     </div>
                   </div>
                 )
@@ -513,11 +564,14 @@ export default function App() {
                 }
 
                 const meta = tileLookup.get(tile.type);
+                const terrain = cell.terrain;
                 const isSelected = selected?.row === rowIndex && selected?.col === colIndex;
 
                 return (
                   <button
-                    className={`tile ${isSelected ? 'selected' : ''} ${tile.state} ${
+                    className={`tile ${terrain ? `terrain-${terrain.type} ${terrain.state}` : ''} ${
+                      isSelected ? 'selected' : ''
+                    } ${tile.state} ${
                       tile.matchPower ? `match-${tile.matchPower}` : ''
                     }`}
                     key={tile.key}
@@ -532,8 +586,17 @@ export default function App() {
                     type="button"
                     onClick={() => handleTileClick(rowIndex, colIndex)}
                     style={{ '--tile-color': meta.color }}
-                    aria-label={`${meta.label} tile at row ${rowIndex + 1}, column ${colIndex + 1}`}
+                    aria-label={`${meta.label} tile at row ${rowIndex + 1}, column ${colIndex + 1}${
+                      terrain?.type === 'mud' ? ', on mud' : ''
+                    }`}
                   >
+                    {terrain?.type === 'mud' && (
+                      <span className="mud-layer" aria-hidden="true">
+                        <span />
+                        <span />
+                        <span />
+                      </span>
+                    )}
                     <img src={meta.image} alt="" draggable="false" />
                     {tile.state === 'clearing' && (
                       <span className="paw-burst" aria-hidden="true">
@@ -564,7 +627,7 @@ export default function App() {
               <img className="victory-mascot" src={MASCOT_STATES.victory.image} alt={MASCOT_STATES.victory.label} />
               <p>You completed Level {levelConfig.level}: {levelConfig.name}</p>
               <p className="collected-summary">
-                {displayedCollected} / {objectiveTarget} {objectiveNoun} collected
+                {displayedCollected} / {objectiveTarget} {objectiveNoun} {objectiveVerb}
               </p>
               <p className="moves-left">Moves left: {game.moves}</p>
               <div className="result-actions">
@@ -589,7 +652,7 @@ export default function App() {
                 alt="Sleepy Cola"
               />
               <p className="collected-summary">
-                {displayedCollected} / {objectiveTarget} {objectiveNoun} collected
+                {displayedCollected} / {objectiveTarget} {objectiveNoun} {objectiveVerb}
               </p>
               <button className="primary-button" type="button" onClick={restart}>
                 Try Again
@@ -707,6 +770,26 @@ function getObjectiveTarget(levelConfig) {
   return levelConfig.objective.targetCount;
 }
 
+function getObjectiveNoun(levelConfig) {
+  if (levelConfig.goalType === 'collectTreats') {
+    return 'treats';
+  }
+
+  if (levelConfig.goalType === 'clearMud') {
+    return 'muddy spots';
+  }
+
+  return 'Colas';
+}
+
+function getObjectiveVerb(levelConfig) {
+  if (levelConfig.goalType === 'clearMud') {
+    return 'cleaned';
+  }
+
+  return 'collected';
+}
+
 function pickRandomTargetTiles(tileTypes, count) {
   const pool = tileTypes.map((tile) => tile.id);
   const picked = [];
@@ -757,6 +840,50 @@ function getTreatFeedback(treatCount, cascadeIndex) {
   }
 
   return { text: 'TREAT!', tone: 'nice' };
+}
+
+function getMudFeedback(mudCount, cascadeIndex, nextCollected = 0, objectiveTarget = Infinity) {
+  if (nextCollected >= objectiveTarget) {
+    return { text: 'SQUEAKY CLEAN!', tone: 'pawsome' };
+  }
+
+  if (cascadeIndex > 0) {
+    return { text: 'CLEAN COMBO!', tone: 'combo' };
+  }
+
+  if (mudCount > 1) {
+    return { text: 'SQUEAKY CLEAN!', tone: 'pawsome' };
+  }
+
+  return null;
+}
+
+function getMarkedObjectiveBoard(board, objectiveState) {
+  if (objectiveState.targetCollectionCount <= 0) {
+    return board;
+  }
+
+  if (objectiveState.isTreatGoal) {
+    return markObjects(board, objectiveState.treatCells, 'collecting');
+  }
+
+  if (objectiveState.isMudGoal) {
+    return markTerrain(board, objectiveState.mudCells, 'cleaning');
+  }
+
+  return board;
+}
+
+function getClearedObjectiveBoard(board, objectiveState) {
+  if (objectiveState.isTreatGoal) {
+    return clearObjects(board, objectiveState.treatCells);
+  }
+
+  if (objectiveState.isMudGoal) {
+    return clearTerrain(board, objectiveState.mudCells);
+  }
+
+  return board;
 }
 
 function getTargetMatchedCells(matches, board, targetTiles) {
