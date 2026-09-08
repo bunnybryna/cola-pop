@@ -90,7 +90,7 @@ export const LEVELS = [
   moveLimit: 24,
   objective: {
     targetTileCount: 3,
-    targetCount: 24,
+      targetCount: 3,
   },
   story: {
     headline: 'The park is in bloom! 🌸',
@@ -114,9 +114,9 @@ export const LEVELS = [
       treatCount: 6,
     },
     story: {
-      headline: 'Cola is getting hungry! 🦴',
-      prompt: 'Make matches next to treats to collect them all.',
-      favoriteLead: 'One match can grab more than one treat!',
+      headline: 'Cola is hungry! 🦴',
+      prompt: 'Match next to treats to collect them.',
+      favoriteLead: 'One match can grab multiple treats!',
       favoriteDetail: '',
     },
     boardObjects: [
@@ -126,7 +126,10 @@ export const LEVELS = [
         image: '/assets/tiles/bone.png',
         count: 6,
         placement: {
-          area: 'inner',
+          borderPadding: 2,
+          minDistanceRatio: 0.3,
+          distanceBasis: 'spawnArea',
+          distanceMetric: 'manhattan',
         },
       },
     ],

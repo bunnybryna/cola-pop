@@ -4,6 +4,10 @@ export function makeInitialBoard(config, tileTypes) {
   for (let attempts = 0; attempts < 200; attempts += 1) {
     const board = createBoardWithoutMatches(config, tileTypes);
 
+    if (!board) {
+      continue;
+    }
+
     fallback = board;
 
     if (findMatches(board, config).cells.length === 0 && hasPossibleMove(board, config)) {
@@ -328,22 +332,40 @@ function placeBoardObjects(board, config) {
 
   const next = cloneBoard(board);
   const occupied = new Set();
+  const placedCells = [];
 
   for (const objectConfig of objects) {
-    const candidates = getObjectPlacementCandidates(config, objectConfig).filter(
-      (cell) => !occupied.has(makeCellKey(cell)),
-    );
+    let candidates = getObjectPlacementCandidates(config, objectConfig);
+    let placedForObject = 0;
 
     for (let index = 0; index < objectConfig.count && candidates.length > 0; index += 1) {
+      const validCandidates = candidates.filter(
+        (cell) =>
+          !occupied.has(makeCellKey(cell)) &&
+          isFarEnoughFromPlacedObjects(cell, placedCells, config, objectConfig),
+      );
+
+      if (validCandidates.length === 0) {
+        break;
+      }
+
+      candidates = validCandidates;
       const candidateIndex = Math.floor(Math.random() * candidates.length);
       const { row, col } = candidates.splice(candidateIndex, 1)[0];
-      occupied.add(makeCellKey({ row, col }));
+      const placedCell = { row, col };
+      occupied.add(makeCellKey(placedCell));
+      placedCells.push(placedCell);
 
       next[row][col] = createCell(null, {
         key: crypto.randomUUID(),
         type: objectConfig.id,
         state: 'active',
       });
+      placedForObject += 1;
+    }
+
+    if (placedForObject < objectConfig.count) {
+      return null;
     }
   }
 
@@ -437,11 +459,44 @@ function getObjectPlacementCandidates(config, objectConfig) {
 }
 
 function isObjectPlacementCell(cell, config, objectConfig) {
-  if (objectConfig.placement?.area === 'inner') {
-    return cell.row > 0 && cell.row < config.height - 1 && cell.col > 0 && cell.col < config.width - 1;
+  const borderPadding = objectConfig.placement?.borderPadding ?? 0;
+
+  return (
+    cell.row >= borderPadding &&
+    cell.row <= config.height - borderPadding - 1 &&
+    cell.col >= borderPadding &&
+    cell.col <= config.width - borderPadding - 1
+  );
+}
+
+function isFarEnoughFromPlacedObjects(cell, placedCells, config, objectConfig) {
+  const minDistance = getMinimumObjectDistance(config, objectConfig);
+
+  return placedCells.every((placedCell) => getObjectDistance(cell, placedCell, objectConfig) >= minDistance);
+}
+
+function getMinimumObjectDistance(config, objectConfig) {
+  const ratio = objectConfig.placement?.minDistanceRatio ?? 0;
+  const borderPadding = objectConfig.placement?.borderPadding ?? 0;
+  const gridWidth =
+    objectConfig.placement?.distanceBasis === 'spawnArea'
+      ? Math.max(1, config.width - borderPadding * 2)
+      : config.width;
+  const gridHeight =
+    objectConfig.placement?.distanceBasis === 'spawnArea'
+      ? Math.max(1, config.height - borderPadding * 2)
+      : config.height;
+  const gridSize = Math.min(gridWidth, gridHeight);
+
+  return Math.ceil(gridSize * ratio);
+}
+
+function getObjectDistance(a, b, objectConfig) {
+  if (objectConfig.placement?.distanceMetric === 'euclidean') {
+    return Math.hypot(a.row - b.row, a.col - b.col);
   }
 
-  return true;
+  return Math.abs(a.row - b.row) + Math.abs(a.col - b.col);
 }
 
 function pushMatch(run, board, matched, groups) {

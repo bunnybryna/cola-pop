@@ -338,7 +338,7 @@ h2 {
 
 .status-panel {
   display: grid;
-  gap: 14px;
+  gap: 10px;
 }
 
 .stat-row,
@@ -467,9 +467,9 @@ h2 {
 
 .mascot-panel {
   display: grid;
-  place-items: end center;
-  min-height: clamp(320px, 44vh, 520px);
-  padding: 12px 18px 0;
+  place-items: start center;
+  min-height: clamp(240px, 34vh, 390px);
+  padding: 14px 18px 0;
   border-color: transparent;
   background: #fff6dd;
   box-shadow: none;
@@ -500,7 +500,7 @@ h2 {
 }
 
 .treat-goal-tile {
-  width: 72px;
+  width: 54px;
   background: rgba(255, 250, 240, 0.7);
 }
 
@@ -512,6 +512,17 @@ h2 {
   display: grid;
   gap: 12px;
   margin-bottom: 14px;
+}
+
+.treat-goal-progress {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  margin-bottom: 10px;
+}
+
+.treat-goal-progress .goal-tiles {
+  gap: 0;
 }
 
 .goal-progress strong {
@@ -560,8 +571,15 @@ h2 {
 
 .board-wrap {
   display: grid;
-  place-items: center;
+  justify-items: center;
+  align-items: start;
+  gap: 10px;
   min-width: 0;
+}
+
+.board-reset {
+  justify-self: end;
+  margin-right: clamp(0px, 2vw, 16px);
 }
 
 .board-wrap.victory-board {
@@ -575,10 +593,12 @@ h2 {
   width: min(100%, 680px);
   aspect-ratio: 1;
   padding: clamp(8px, 1.7vw, 16px);
-  border: 3px solid rgba(255, 255, 255, 0.8);
+  border: 3px solid rgba(255, 255, 255, 0.92);
   border-radius: 8px;
   background: rgba(255, 255, 255, 0.55);
-  box-shadow: 0 24px 55px rgba(90, 64, 48, 0.18);
+  box-shadow:
+    0 0 0 1px rgba(116, 82, 58, 0.08),
+    0 26px 62px rgba(90, 64, 48, 0.22);
 }
 
 .tile {
@@ -671,6 +691,11 @@ h2 {
 }
 
 .object-cell.collecting {
+  box-shadow:
+    inset 0 0 0 2px rgba(255, 255, 255, 0.95),
+    0 0 0 4px rgba(255, 204, 77, 0.28),
+    0 0 24px rgba(255, 204, 77, 0.58),
+    0 8px 18px rgba(91, 58, 47, 0.18);
   animation: treat-collect 620ms ease both;
 }
 
@@ -1663,6 +1688,10 @@ h2 {
     grid-template-columns: 1fr;
   }
 
+  .board-reset {
+    margin-right: 0;
+  }
+
   .status-panel {
     grid-template-columns: minmax(118px, 0.42fr) minmax(0, 1fr);
     gap: 10px;
@@ -1748,5 +1777,48 @@ h2 {
 
   .lose-mascot {
     width: min(118px, 40vw);
+  }
+}
+
+@media (max-width: 560px) {
+  .status-panel {
+    grid-template-columns: 1fr;
+  }
+
+  .stat-row,
+  .objective {
+    width: 100%;
+  }
+
+  .stat-row {
+    gap: 14px;
+  }
+
+  .stat-row strong {
+    font-size: 1.55rem;
+  }
+
+  .objective {
+    padding: 16px;
+  }
+
+  .objective-heading span {
+    font-size: 1rem;
+  }
+
+  .goal-tile {
+    width: 58px;
+  }
+
+  .treat-goal-tile {
+    width: 52px;
+  }
+
+  .treat-goal-progress {
+    gap: 12px;
+  }
+
+  .goal-progress strong {
+    font-size: 1.85rem;
   }
 }

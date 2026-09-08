@@ -216,7 +216,16 @@ export default function App() {
           : getMatchFeedback(matchPower, cascadeIndex);
 
       playSound(matchPower >= 4 || cascadeIndex > 0 ? 'special' : 'pop');
-      reactMascot(matchPower >= 4 || cascadeIndex > 0 ? 'bigCombo' : 'goodMatch', matchPower >= 4 ? 1200 : 850);
+
+      if (levelConfig.goalType === 'collectTreats') {
+        if (targetCollectionCount > 1 || (targetCollectionCount > 0 && cascadeIndex > 0)) {
+          reactMascot('bigCombo', 1200);
+        } else if (targetCollectionCount === 1) {
+          reactMascot('almostWinning', 1050);
+        }
+      } else {
+        reactMascot(matchPower >= 4 || cascadeIndex > 0 ? 'bigCombo' : 'goodMatch', matchPower >= 4 ? 1200 : 850);
+      }
 
       if (feedback) {
         setMatchFeedback({ ...feedback, key: `${Date.now()}-${cascadeIndex}` });
@@ -238,6 +247,10 @@ export default function App() {
       }));
 
       if (targetCollectionCount > 0) {
+        if (levelConfig.goalType === 'collectTreats') {
+          await sleep(180);
+        }
+
         launchCollectFlyers(targetCells, board);
         await sleep(levelConfig.timing.collectFly);
         collected = nextCollected;
@@ -360,7 +373,6 @@ export default function App() {
       <section className="topbar" aria-label="Level status">
         <div className="brand-lockup">
           <div>
-          <p className="eyebrow">Level {levelConfig.level}</p>
           <h1 className="game-title" aria-label="COLA & CO.">
             <span className="cola-word">
               <span>C</span>
@@ -378,9 +390,6 @@ export default function App() {
           <p className="game-tagline">Match. Play. Wag.</p>
           </div>
         </div>
-        <button className="icon-button" type="button" onClick={restart} aria-label="Restart level" title="Restart">
-          <RotateCcw size={22} />
-        </button>
       </section>
 
       <section className="game-layout">
@@ -417,7 +426,7 @@ export default function App() {
                 {isTreatGoal ? 'Goal' : "Cola's Favorites"}
               </span>
             </div>
-            <div className="goal-progress" ref={goalTargetRef}>
+            <div className={`goal-progress ${isTreatGoal ? 'treat-goal-progress' : ''}`} ref={goalTargetRef}>
               {isTreatGoal ? (
                 objectiveObject && (
                   <div className="goal-tiles" aria-label="Target treat">
@@ -459,6 +468,9 @@ export default function App() {
         </aside>
 
         <section className={`board-wrap ${victoryCelebration ? 'victory-board' : ''}`} aria-label="Cola Match board">
+          <button className="icon-button board-reset" type="button" onClick={restart} aria-label="Restart level" title="Restart level">
+            <RotateCcw size={22} />
+          </button>
           <div className="board" style={{ '--board-size': levelConfig.width }}>
             {game.board.map((row, rowIndex) =>
               row.map((cell, colIndex) => {
