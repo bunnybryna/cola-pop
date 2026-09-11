@@ -9,6 +9,7 @@ const SOUND_PATHS = {
   'bark-happy': '/assets/sounds/bark-happy.ogg',
   invalid: '/assets/sounds/invalid.ogg',
   victory: '/assets/sounds/victory.mp3',
+  'wah-wah-sad': '/assets/sounds/wah-wah-sad.mp3',
 };
 
 const VOLUMES = {
@@ -22,6 +23,7 @@ const VOLUMES = {
   'bark-happy': 0.42,
   invalid: 0.28,
   victory: 0.5,
+  'wah-wah-sad': 0.48,
 };
 
 const players = new Map();

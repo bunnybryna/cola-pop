@@ -15,6 +15,7 @@ Local mapping:
 - `invalid.ogg`: `error_001.ogg`
 - `victory.ogg`: `bong_001.ogg`, legacy fallback
 - `victory.mp3`: `Victory Fanfare` by Universfield, Pixabay Content License, https://pixabay.com/sound-effects/musical-victory-fanfare-152480/
+- `wah-wah-sad.mp3`: fail sound
 - `bark-happy.ogg`: `Dog Bark.wav` by 8bitmyketison, Freesound, Creative Commons 0, https://freesound.org/people/8bitmyketison/sounds/699822/
 - `epic.mp3`: `Man Says Epic` by floraphonic, Pixabay Content License, https://pixabay.com/sound-effects/people-man-says-epic-184039/
 - `amazing.mp3`: `Man Says Amazing` by floraphonic, Pixabay Content License, https://pixabay.com/sound-effects/people-man-says-amazing-184036/
@@ -28,4 +29,5 @@ Gameplay events also route through these sound IDs:
 - `amazing`: cascade x3
 - `unbelievable`: cascade x4+
 - `bark-happy`: victory only
-- muddy spot cleaned: uses normal match sounds (`pop` or `special`)
+- `wah-wah-sad`: level failed
+- muddy spot cleaned: uses objective progress sound (`goal`)

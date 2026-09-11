@@ -94,7 +94,7 @@ export const LEVELS = [
   moveLimit: 20,
   objective: {
     targetTileCount: 3,
-      targetCount: 12,
+      targetCount: 24,
   },
   story: {
     headline: 'The park is in bloom! 🌸',
@@ -116,7 +116,7 @@ export const LEVELS = [
     goalType: 'collectTreats',
     width: 8,
     height: 8,
-    moveLimit: 20,
+    moveLimit: 3,
     objective: {
       treatType: 'bone',
       treatCount: 6,
@@ -130,6 +130,10 @@ export const LEVELS = [
     completionImage: {
       image: '/assets/level2complete.png',
       label: 'Cola receiving a bone treat',
+    },
+    failureImage: {
+      image: '/assets/level2fail.png',
+      label: 'Cola still waiting for a bone treat',
     },
     boardObjects: [
       {

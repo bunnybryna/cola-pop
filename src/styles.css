@@ -1241,6 +1241,54 @@ h2 {
   animation: collect-fly 620ms cubic-bezier(0.16, 0.85, 0.24, 1) forwards;
 }
 
+.collect-flyer.clean-flyer {
+  display: grid;
+  place-items: center;
+  overflow: visible;
+  border-radius: 50%;
+  background:
+    radial-gradient(circle at 42% 38%, #ffffff 0 17%, transparent 18%),
+    radial-gradient(circle at 50% 50%, #d9fff7 0 38%, #39d5b2 39% 67%, #16856f 68% 100%);
+  box-shadow:
+    0 0 0 2px rgba(255, 255, 255, 0.98),
+    0 0 18px rgba(72, 232, 198, 0.54),
+    0 9px 18px rgba(91, 58, 47, 0.16);
+}
+
+.collect-flyer.clean-flyer::before {
+  content: "";
+  width: 45%;
+  height: 25%;
+  border-left: 3px solid #ffffff;
+  border-bottom: 3px solid #ffffff;
+  transform: translateY(-1px) rotate(-45deg);
+  filter: drop-shadow(0 1px 0 rgba(22, 133, 111, 0.36));
+}
+
+.clean-flyer span {
+  position: absolute;
+  width: 6px;
+  height: 6px;
+  border-radius: 999px;
+  background: #ffffff;
+  box-shadow: 0 0 8px rgba(255, 255, 255, 0.9);
+}
+
+.clean-flyer span:nth-child(1) {
+  top: -5px;
+  right: 3px;
+}
+
+.clean-flyer span:nth-child(2) {
+  right: -5px;
+  bottom: 7px;
+}
+
+.clean-flyer span:nth-child(3) {
+  bottom: -3px;
+  left: 4px;
+}
+
 .victory-burst {
   position: fixed;
   inset: 0;

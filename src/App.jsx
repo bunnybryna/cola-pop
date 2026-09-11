@@ -146,6 +146,9 @@ export default function App() {
       }));
       await sleep(levelConfig.timing.invalidSwap);
       const status = getStatus(game.collected, nextMoves, levelConfig);
+      if (status === 'lost') {
+        playSound('wah-wah-sad');
+      }
       setGame((current) => ({
         ...current,
         board: resetTileStates(swapTiles(swapped, from, to)),
@@ -178,6 +181,9 @@ export default function App() {
       await playVictoryBarks(levelConfig);
       setBusy(false);
       return;
+    }
+    if (status === 'lost') {
+      playSound('wah-wah-sad');
     }
     setGame((current) => ({
       ...current,
@@ -285,9 +291,7 @@ export default function App() {
           await sleep(180);
         }
 
-        if (!isMudGoal) {
-          launchCollectFlyers(targetCells, board);
-        }
+        launchCollectFlyers(targetCells, board, { kind: isMudGoal ? 'mud-clean' : 'collectible' });
 
         await sleep(isMudGoal ? Math.min(420, levelConfig.timing.clear) : levelConfig.timing.collectFly);
         collected = nextCollected;
@@ -379,8 +383,9 @@ export default function App() {
     mascotTimerRef.current = window.setTimeout(() => setMascotReaction(null), duration);
   }
 
-  function launchCollectFlyers(cells, boardSnapshot) {
+  function launchCollectFlyers(cells, boardSnapshot, options = {}) {
     const targetRect = goalTargetRef.current?.getBoundingClientRect();
+    const kind = options.kind ?? 'collectible';
 
     if (!targetRect) {
       return;
@@ -396,7 +401,7 @@ export default function App() {
         const object = boardCell?.object;
         const meta = tile ? tileLookup.get(tile.type) : objectLookup.get(object?.type);
 
-        if (!sourceRect || !meta) {
+        if (!sourceRect || (kind !== 'mud-clean' && !meta)) {
           return null;
         }
 
@@ -404,9 +409,10 @@ export default function App() {
         const fromY = sourceRect.top + sourceRect.height / 2;
 
         return {
-          id: `${tile?.key ?? object.key}-fly-${index}`,
-          image: meta.image,
-          label: meta.label,
+          id: `${kind}-${tile?.key ?? object?.key ?? `${cell.row}-${cell.col}`}-fly-${index}`,
+          kind,
+          image: meta?.image,
+          label: kind === 'mud-clean' ? 'Cleaned mud progress' : meta.label,
           fromX,
           fromY,
           dx: targetX - fromX,
@@ -680,23 +686,29 @@ export default function App() {
         </div>
       )}
 
-      {collectFlyers.map((flyer) => (
-        <img
-          className="collect-flyer"
-          key={flyer.id}
-          src={flyer.image}
-          alt=""
-          style={{
-            left: `${flyer.fromX}px`,
-            top: `${flyer.fromY}px`,
-            '--fly-x': `${flyer.dx}px`,
-            '--fly-y': `${flyer.dy}px`,
-            '--fly-mid-x': `${flyer.dx * 0.88}px`,
-            '--fly-mid-y': `${flyer.dy * 0.88 - 20}px`,
-            animationDelay: `${flyer.delay}ms`,
-          }}
-        />
-      ))}
+      {collectFlyers.map((flyer) => {
+        const flyerStyle = {
+          left: `${flyer.fromX}px`,
+          top: `${flyer.fromY}px`,
+          '--fly-x': `${flyer.dx}px`,
+          '--fly-y': `${flyer.dy}px`,
+          '--fly-mid-x': `${flyer.dx * 0.88}px`,
+          '--fly-mid-y': `${flyer.dy * 0.88 - 20}px`,
+          animationDelay: `${flyer.delay}ms`,
+        };
+
+        if (flyer.kind === 'mud-clean') {
+          return (
+            <span className="collect-flyer clean-flyer" key={flyer.id} style={flyerStyle} aria-label={flyer.label}>
+              <span />
+              <span />
+              <span />
+            </span>
+          );
+        }
+
+        return <img className="collect-flyer" key={flyer.id} src={flyer.image} alt="" style={flyerStyle} />;
+      })}
 
       <div className={`completion-spark ${objectiveComplete ? 'show' : ''}`}>Goal complete</div>
     </main>
@@ -837,7 +849,7 @@ function getPrimaryReward({ cascadeIndex, matchPower, objectiveCount, isTreatGoa
 
   if (objectiveCount > 0) {
     return {
-      sound: isMudGoal ? getMatchSound(matchPower) : 'goal',
+      sound: 'goal',
       feedback: getObjectiveFeedback({ objectiveCount, isTreatGoal, isMudGoal }),
       suppressFall: false,
     };
@@ -909,8 +921,10 @@ function getObjectiveFeedback({ objectiveCount, isTreatGoal, isMudGoal }) {
       : { text: 'TREAT!', tone: 'nice' };
   }
 
-  if (isMudGoal && objectiveCount > 1) {
-    return { text: 'SQUEAKY CLEAN!', tone: 'pawsome' };
+  if (isMudGoal) {
+    return objectiveCount > 1
+      ? { text: 'SQUEAKY CLEAN!', tone: 'pawsome' }
+      : { text: 'CLEAN!', tone: 'nice' };
   }
 
   return null;
