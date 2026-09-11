@@ -10,7 +10,12 @@ export function makeInitialBoard(config, tileTypes) {
 
     fallback = board;
 
-    if (findMatches(board, config).cells.length === 0 && hasPossibleMove(board, config)) {
+    if (
+      findMatches(board, config).cells.length === 0 &&
+      hasPossibleMove(board, config) &&
+      isWithinAllTerrainPlacementGoals(board, config) &&
+      isFairInitialBoard(board, config)
+    ) {
       return board;
     }
   }
@@ -427,15 +432,38 @@ function placeTerrain(board, config) {
     return board;
   }
 
+  const attempts = Math.max(1, Math.max(...terrainConfigs.map((terrainConfig) => terrainConfig.placement?.layoutAttempts ?? 1)));
+  let fallback = null;
+
+  for (let attempt = 0; attempt < attempts; attempt += 1) {
+    const placed = placeTerrainLayout(board, config, terrainConfigs);
+
+    if (!placed) {
+      continue;
+    }
+
+    fallback = fallback ?? placed;
+
+    if (isWithinAllTerrainPlacementGoals(placed, config)) {
+      return placed;
+    }
+  }
+
+  return fallback;
+}
+
+function placeTerrainLayout(board, config, terrainConfigs) {
   const next = cloneBoard(board);
-  const occupied = new Set();
-  const rowCounts = new Map();
-  const colCounts = new Map();
 
   for (const terrainConfig of terrainConfigs) {
+    const occupied = getOccupiedTerrainKeys(next);
+    const rowCounts = getTerrainRowCounts(next, terrainConfig.id);
+    const colCounts = getTerrainColumnCounts(next, terrainConfig.id);
+    const placedCells = getTerrainCells(next, terrainConfig.id);
+    const pairAnchors = [];
     let candidates = getTerrainPlacementCandidates(next, config, terrainConfig);
     let placedForTerrain = 0;
-    const adjacentPairCount = terrainConfig.placement?.adjacentPairCount ?? 0;
+    const adjacentPairCount = getAdjacentPairCount(terrainConfig);
 
     for (
       let pairIndex = 0;
@@ -443,24 +471,23 @@ function placeTerrain(board, config) {
       pairIndex += 1
     ) {
       const pairCandidates = getTerrainPairCandidates(candidates, next, terrainConfig).filter((pair) =>
-        pair.every(
-          (cell) =>
-            !occupied.has(makeCellKey(cell)) &&
-            isWithinTerrainSpreadLimits(cell, terrainConfig, rowCounts, colCounts),
-        ),
+        isValidTerrainPair(pair, config, terrainConfig, occupied, rowCounts, colCounts, placedCells, pairAnchors),
       );
 
       if (pairCandidates.length === 0) {
         break;
       }
 
-      const pair = pairCandidates[Math.floor(Math.random() * pairCandidates.length)];
+      const pair = pickWeightedTerrainCandidate(pairCandidates, config, terrainConfig);
+      const anchor = getPairAnchor(pair);
 
       for (const cell of pair) {
         placeTerrainCell(next, cell, terrainConfig, occupied, rowCounts, colCounts);
+        placedCells.push(cell);
         placedForTerrain += 1;
       }
 
+      pairAnchors.push(anchor);
       candidates = candidates.filter((cell) => !occupied.has(makeCellKey(cell)));
     }
 
@@ -468,7 +495,8 @@ function placeTerrain(board, config) {
       const validCandidates = candidates.filter(
         (cell) =>
           !occupied.has(makeCellKey(cell)) &&
-          isWithinTerrainSpreadLimits(cell, terrainConfig, rowCounts, colCounts),
+          isWithinTerrainSpreadLimits(cell, config, terrainConfig, rowCounts, colCounts) &&
+          isWithinTerrainClusterLimit(cell, config, terrainConfig, placedCells),
       );
 
       if (validCandidates.length === 0) {
@@ -476,9 +504,10 @@ function placeTerrain(board, config) {
       }
 
       candidates = validCandidates;
-      const candidateIndex = Math.floor(Math.random() * candidates.length);
-      const placedCell = candidates.splice(candidateIndex, 1)[0];
+      const placedCell = pickWeightedTerrainCandidate(candidates, config, terrainConfig);
+      candidates = candidates.filter((cell) => makeCellKey(cell) !== makeCellKey(placedCell));
       placeTerrainCell(next, placedCell, terrainConfig, occupied, rowCounts, colCounts);
+      placedCells.push(placedCell);
       placedForTerrain += 1;
     }
 
@@ -689,6 +718,64 @@ function getTerrainPairCandidates(candidates, board, terrainConfig) {
   return sameTilePairs.length > 0 ? sameTilePairs : pairs;
 }
 
+function getAdjacentPairCount(terrainConfig) {
+  const { adjacentPairCount, adjacentPairCountRange } = terrainConfig.placement ?? {};
+
+  if (!adjacentPairCountRange) {
+    return adjacentPairCount ?? 0;
+  }
+
+  const [min, max] = adjacentPairCountRange;
+  return min + Math.floor(Math.random() * (max - min + 1));
+}
+
+function isValidTerrainPair(pair, config, terrainConfig, occupied, rowCounts, colCounts, placedCells, pairAnchors) {
+  return (
+    pair.every(
+      (cell) =>
+        !occupied.has(makeCellKey(cell)) &&
+        isWithinTerrainSpreadLimits(cell, config, terrainConfig, rowCounts, colCounts) &&
+        isWithinTerrainClusterLimit(cell, config, terrainConfig, placedCells),
+    ) &&
+    isPairSpreadOut(pair, terrainConfig, pairAnchors) &&
+    getExternalTerrainNeighborCount(pair, config, placedCells) <= (terrainConfig.placement?.maxPairExternalNeighbors ?? 1)
+  );
+}
+
+function pickWeightedTerrainCandidate(candidates, config, terrainConfig) {
+  const weights = candidates.map((candidate) => getTerrainCandidateWeight(candidate, config, terrainConfig));
+  const totalWeight = weights.reduce((total, weight) => total + weight, 0);
+  let threshold = Math.random() * totalWeight;
+
+  for (let index = 0; index < candidates.length; index += 1) {
+    threshold -= weights[index];
+
+    if (threshold <= 0) {
+      return candidates[index];
+    }
+  }
+
+  return candidates[candidates.length - 1];
+}
+
+function getTerrainCandidateWeight(cell, config, terrainConfig) {
+  if (Array.isArray(cell)) {
+    return cell.reduce((total, pairCell) => total + getTerrainCandidateWeight(pairCell, config, terrainConfig), 0);
+  }
+
+  const middleRows = terrainConfig.placement?.preferredRows;
+
+  if (middleRows?.includes(cell.row)) {
+    return terrainConfig.placement?.preferredRowWeight ?? 4;
+  }
+
+  if (cell.row >= config.height - 2) {
+    return terrainConfig.placement?.bottomRowWeight ?? 0.35;
+  }
+
+  return 1;
+}
+
 function isTerrainPlacementCell(board, cell, config, terrainConfig) {
   const borderPadding = terrainConfig.placement?.borderPadding ?? 0;
   const boardCell = board[cell.row]?.[cell.col];
@@ -698,17 +785,236 @@ function isTerrainPlacementCell(board, cell, config, terrainConfig) {
     cell.row <= config.height - borderPadding - 1 &&
     cell.col >= borderPadding &&
     cell.col <= config.width - borderPadding - 1 &&
+    !isForbiddenTerrainCell(cell, config, terrainConfig) &&
     Boolean(boardCell?.tile) &&
     !boardCell.object &&
     !boardCell.terrain
   );
 }
 
-function isWithinTerrainSpreadLimits(cell, terrainConfig, rowCounts, colCounts) {
+function isForbiddenTerrainCell(cell, config, terrainConfig) {
+  if (!terrainConfig.placement?.avoidCorners) {
+    return false;
+  }
+
+  const isTopOrBottom = cell.row === 0 || cell.row === config.height - 1;
+  const isLeftOrRight = cell.col === 0 || cell.col === config.width - 1;
+
+  return isTopOrBottom && isLeftOrRight;
+}
+
+function isWithinTerrainSpreadLimits(cell, config, terrainConfig, rowCounts, colCounts) {
   const maxPerRow = terrainConfig.placement?.maxPerRow ?? Infinity;
   const maxPerColumn = terrainConfig.placement?.maxPerColumn ?? Infinity;
+  const maxBottomRow = terrainConfig.placement?.maxBottomRow ?? Infinity;
+  const maxSecondBottomRow = terrainConfig.placement?.maxSecondBottomRow ?? Infinity;
+  const maxBottomTwoRows = terrainConfig.placement?.maxBottomTwoRows ?? Infinity;
+  const nextRowCount = (rowCounts.get(cell.row) ?? 0) + 1;
+  const nextColCount = (colCounts.get(cell.col) ?? 0) + 1;
+  const bottomRow = config.height - 1;
+  const secondBottomRow = config.height - 2;
+  const bottomTwoCount =
+    (rowCounts.get(bottomRow) ?? 0) + (rowCounts.get(secondBottomRow) ?? 0) + (cell.row >= secondBottomRow ? 1 : 0);
 
-  return (rowCounts.get(cell.row) ?? 0) < maxPerRow && (colCounts.get(cell.col) ?? 0) < maxPerColumn;
+  if (nextRowCount > maxPerRow || nextColCount > maxPerColumn || bottomTwoCount > maxBottomTwoRows) {
+    return false;
+  }
+
+  if (cell.row === bottomRow && nextRowCount > maxBottomRow) {
+    return false;
+  }
+
+  if (cell.row === secondBottomRow && nextRowCount > maxSecondBottomRow) {
+    return false;
+  }
+
+  return true;
+}
+
+function isWithinTerrainClusterLimit(cell, config, terrainConfig, placedCells) {
+  const maxNeighbors = terrainConfig.placement?.maxOrthogonalTerrainNeighbors ?? Infinity;
+  const placedKeys = new Set(placedCells.map(makeCellKey));
+  const neighborCount = getOrthogonalNeighbors(cell).filter(
+    (neighbor) => isInsideBoard(neighbor, config) && placedKeys.has(makeCellKey(neighbor)),
+  ).length;
+
+  return neighborCount <= maxNeighbors;
+}
+
+function isPairSpreadOut(pair, terrainConfig, pairAnchors) {
+  const minDistance = terrainConfig.placement?.minPairAnchorDistance ?? 0;
+
+  if (minDistance <= 0) {
+    return true;
+  }
+
+  const anchor = getPairAnchor(pair);
+
+  return pairAnchors.every((placedAnchor) => getManhattanDistance(anchor, placedAnchor) >= minDistance);
+}
+
+function getPairAnchor(pair) {
+  return {
+    row: pair.reduce((total, cell) => total + cell.row, 0) / pair.length,
+    col: pair.reduce((total, cell) => total + cell.col, 0) / pair.length,
+  };
+}
+
+function getExternalTerrainNeighborCount(pair, config, placedCells) {
+  const pairKeys = new Set(pair.map(makeCellKey));
+  const placedKeys = new Set(placedCells.map(makeCellKey));
+  let count = 0;
+
+  for (const cell of pair) {
+    for (const neighbor of getOrthogonalNeighbors(cell)) {
+      if (isInsideBoard(neighbor, config) && !pairKeys.has(makeCellKey(neighbor)) && placedKeys.has(makeCellKey(neighbor))) {
+        count += 1;
+      }
+    }
+  }
+
+  return count;
+}
+
+function isWithinAllTerrainPlacementGoals(board, config) {
+  return (config.terrain ?? []).every((terrainConfig) => isWithinTerrainPlacementGoals(board, config, terrainConfig));
+}
+
+function isWithinTerrainPlacementGoals(board, config, terrainConfig) {
+  const cells = getTerrainCells(board, terrainConfig.id);
+  const rowCounts = getTerrainRowCounts(board, terrainConfig.id);
+  const colCounts = getTerrainColumnCounts(board, terrainConfig.id);
+  const placement = terrainConfig.placement ?? {};
+  const bottomRow = config.height - 1;
+  const secondBottomRow = config.height - 2;
+  const bottomTwoCount = (rowCounts.get(bottomRow) ?? 0) + (rowCounts.get(secondBottomRow) ?? 0);
+  const adjacentPairCount = countAdjacentTerrainPairs(cells, config);
+  const preferredRowCount = cells.filter((cell) => placement.preferredRows?.includes(cell.row)).length;
+
+  return (
+    cells.length === terrainConfig.count &&
+    cells.every((cell) => !isForbiddenTerrainCell(cell, config, terrainConfig)) &&
+    Math.max(0, ...rowCounts.values()) <= (placement.maxPerRow ?? Infinity) &&
+    Math.max(0, ...colCounts.values()) <= (placement.maxPerColumn ?? Infinity) &&
+    (rowCounts.get(bottomRow) ?? 0) <= (placement.maxBottomRow ?? Infinity) &&
+    (rowCounts.get(secondBottomRow) ?? 0) <= (placement.maxSecondBottomRow ?? Infinity) &&
+    bottomTwoCount <= (placement.maxBottomTwoRows ?? Infinity) &&
+    preferredRowCount >= (placement.minPreferredRowCount ?? 0) &&
+    adjacentPairCount >= (placement.minAdjacentPairs ?? 0) &&
+    adjacentPairCount <= (placement.maxAdjacentPairs ?? Infinity)
+  );
+}
+
+function isFairInitialBoard(board, config) {
+  return (config.terrain ?? []).every((terrainConfig) => {
+    const requiredCleanable = terrainConfig.placement?.minImmediatelyCleanable ?? 0;
+
+    if (requiredCleanable === 0) {
+      return true;
+    }
+
+    return countImmediatelyCleanableTerrainCells(board, config, terrainConfig.id) >= requiredCleanable;
+  });
+}
+
+function countImmediatelyCleanableTerrainCells(board, config, terrainType) {
+  const cleanable = new Set();
+
+  for (let row = 0; row < config.height; row += 1) {
+    for (let col = 0; col < config.width; col += 1) {
+      const current = { row, col };
+      const candidates = [
+        { row, col: col + 1 },
+        { row: row + 1, col },
+      ];
+
+      for (const target of candidates) {
+        if (target.row >= config.height || target.col >= config.width || !canSwapCells(board, current, target)) {
+          continue;
+        }
+
+        const matches = findMatches(swapTiles(board, current, target), config);
+
+        for (const cell of findMatchedTerrain(matches, board, terrainType)) {
+          cleanable.add(makeCellKey(cell));
+        }
+      }
+    }
+  }
+
+  return cleanable.size;
+}
+
+function countAdjacentTerrainPairs(cells, config) {
+  const keys = new Set(cells.map(makeCellKey));
+  let count = 0;
+
+  for (const cell of cells) {
+    const neighbors = [
+      { row: cell.row, col: cell.col + 1 },
+      { row: cell.row + 1, col: cell.col },
+    ];
+
+    for (const neighbor of neighbors) {
+      if (isInsideBoard(neighbor, config) && keys.has(makeCellKey(neighbor))) {
+        count += 1;
+      }
+    }
+  }
+
+  return count;
+}
+
+function getTerrainCells(board, terrainType) {
+  const cells = [];
+
+  for (let row = 0; row < board.length; row += 1) {
+    for (let col = 0; col < board[row].length; col += 1) {
+      if (board[row][col].terrain?.type === terrainType) {
+        cells.push({ row, col });
+      }
+    }
+  }
+
+  return cells;
+}
+
+function getTerrainRowCounts(board, terrainType) {
+  const counts = new Map();
+
+  for (const cell of getTerrainCells(board, terrainType)) {
+    counts.set(cell.row, (counts.get(cell.row) ?? 0) + 1);
+  }
+
+  return counts;
+}
+
+function getTerrainColumnCounts(board, terrainType) {
+  const counts = new Map();
+
+  for (const cell of getTerrainCells(board, terrainType)) {
+    counts.set(cell.col, (counts.get(cell.col) ?? 0) + 1);
+  }
+
+  return counts;
+}
+
+function getOccupiedTerrainKeys(board) {
+  const keys = new Set();
+
+  for (let row = 0; row < board.length; row += 1) {
+    for (let col = 0; col < board[row].length; col += 1) {
+      if (board[row][col].terrain) {
+        keys.add(makeCellKey({ row, col }));
+      }
+    }
+  }
+
+  return keys;
+}
+
+function getManhattanDistance(a, b) {
+  return Math.abs(a.row - b.row) + Math.abs(a.col - b.col);
 }
 
 function pushMatch(run, board, matched, groups) {

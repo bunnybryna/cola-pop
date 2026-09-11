@@ -75,6 +75,7 @@ export default function App() {
   const objectiveNoun = getObjectiveNoun(levelConfig);
   const objectiveVerb = getObjectiveVerb(levelConfig);
   const objectiveComplete = game.collected >= objectiveTarget;
+  const resultArtwork = getResultArtwork(levelConfig, game.status);
   const mascotState = getMascotState(game, mascotReaction, levelConfig);
   const displayedCollected = Math.min(game.collected, objectiveTarget);
   const progress = Math.min(100, (displayedCollected / objectiveTarget) * 100);
@@ -171,15 +172,10 @@ export default function App() {
         ...current,
         ...resolved,
         moves: nextMoves,
-        status: 'celebrating',
-        message: getEndMessage(status),
-      }));
-      await sleep(levelConfig.timing.victoryPause);
-      setGame((current) => ({
-        ...current,
         status,
         message: getEndMessage(status),
       }));
+      await playVictoryBarks(levelConfig);
       setBusy(false);
       return;
     }
@@ -219,6 +215,7 @@ export default function App() {
             ? mudCells.length
             : getTargetCollectionCount(collection, objectiveTileSet);
       const nextCollected = collected + targetCollectionCount;
+      const completesObjective = nextCollected >= objectiveTarget;
       const targetCells =
         isTreatGoal
           ? treatCells
@@ -227,16 +224,18 @@ export default function App() {
             : getTargetMatchedCells(matches, board, objectiveTileSet);
       score += scoreMatches(matches, levelConfig.scoring, cascadeIndex);
       const matchPower = getMatchPower(matches);
-      const feedback =
-        targetCollectionCount > 0 && isTreatGoal
-          ? getTreatFeedback(targetCollectionCount, cascadeIndex)
-          : targetCollectionCount > 1 && isMudGoal
-            ? getMudFeedback(targetCollectionCount, cascadeIndex, nextCollected, objectiveTarget)
-          : targetCollectionCount > 0 && isMudGoal && nextCollected >= objectiveTarget
-            ? getMudFeedback(targetCollectionCount, cascadeIndex, nextCollected, objectiveTarget)
-          : getMatchFeedback(matchPower, cascadeIndex);
+      const reward = getPrimaryReward({
+        cascadeIndex,
+        matchPower,
+        objectiveCount: targetCollectionCount,
+        isTreatGoal,
+        isMudGoal,
+        completesObjective,
+      });
 
-      playSound(matchPower >= 4 || cascadeIndex > 0 ? 'special' : 'pop');
+      if (reward.sound) {
+        playSound(reward.sound);
+      }
 
       if (isTreatGoal) {
         if (targetCollectionCount > 1 || (targetCollectionCount > 0 && cascadeIndex > 0)) {
@@ -258,8 +257,8 @@ export default function App() {
         reactMascot(matchPower >= 4 || cascadeIndex > 0 ? 'bigCombo' : 'goodMatch', matchPower >= 4 ? 1200 : 850);
       }
 
-      if (feedback) {
-        setMatchFeedback({ ...feedback, key: `${Date.now()}-${cascadeIndex}` });
+      if (reward.feedback) {
+        setMatchFeedback({ ...reward.feedback, key: `${Date.now()}-${cascadeIndex}` });
       }
 
       const markedBoard = markCells(
@@ -292,7 +291,6 @@ export default function App() {
 
         await sleep(isMudGoal ? Math.min(420, levelConfig.timing.clear) : levelConfig.timing.collectFly);
         collected = nextCollected;
-        playSound('goal');
         setProgressPulseKey(Date.now());
         setGame((current) => ({ ...current, collected }));
         await sleep(isMudGoal ? 80 : Math.max(0, levelConfig.timing.clear - levelConfig.timing.collectFly));
@@ -310,7 +308,9 @@ export default function App() {
         matches.cells,
       );
       board = applyGravityAndRefill(clearedBoard, levelConfig, TILE_TYPES);
-      playSound('fall');
+      if (!reward.suppressFall) {
+        playSound('fall');
+      }
       setGame((current) => ({ ...current, board, score, collected }));
       await sleep(levelConfig.timing.fall);
 
@@ -333,6 +333,15 @@ export default function App() {
       score,
       collected,
     };
+  }
+
+  async function playVictoryBarks(config) {
+    const timing = config.timing.victoryBarks ?? { firstDelay: 900, secondDelay: 520 };
+
+    await sleep(timing.firstDelay);
+    playSound('bark-happy');
+    await sleep(timing.secondDelay);
+    playSound('bark-happy');
   }
 
   function restart() {
@@ -624,7 +633,7 @@ export default function App() {
               </p>
               <h2 id="result-title">PAWSOME!</h2>
               <p>Cola is very happy!</p>
-              <img className="victory-mascot" src={MASCOT_STATES.victory.image} alt={MASCOT_STATES.victory.label} />
+              <img className="victory-mascot" src={resultArtwork.image} alt={resultArtwork.label} />
               <p>You completed Level {levelConfig.level}: {levelConfig.name}</p>
               <p className="collected-summary">
                 {displayedCollected} / {objectiveTarget} {objectiveNoun} {objectiveVerb}
@@ -643,14 +652,9 @@ export default function App() {
             </div>
           ) : (
             <div className="result-card lose-card">
-              <PawPrint size={34} aria-hidden="true" />
               <h2 id="result-title">SO CLOSE!</h2>
               <p>Cola wants to try again.</p>
-              <img
-                className="lose-mascot"
-                src="/assets/tiles/sleepy.png"
-                alt="Sleepy Cola"
-              />
+              <img className="lose-mascot" src={resultArtwork.image} alt={resultArtwork.label} />
               <p className="collected-summary">
                 {displayedCollected} / {objectiveTarget} {objectiveNoun} {objectiveVerb}
               </p>
@@ -790,6 +794,18 @@ function getObjectiveVerb(levelConfig) {
   return 'collected';
 }
 
+function getResultArtwork(levelConfig, status) {
+  if (status === 'won') {
+    return levelConfig.completionImage ?? MASCOT_STATES.victory;
+  }
+
+  if (status === 'lost') {
+    return levelConfig.failureImage ?? MASCOT_STATES.invalidSwap;
+  }
+
+  return MASCOT_STATES.default;
+}
+
 function pickRandomTargetTiles(tileTypes, count) {
   const pool = tileTypes.map((tile) => tile.id);
   const picked = [];
@@ -806,19 +822,75 @@ function getMatchPower(matches) {
   return Math.max(...matches.groups.map((group) => group.cells.length), 3);
 }
 
-function getMatchFeedback(matchPower, cascadeIndex) {
+function getPrimaryReward({ cascadeIndex, matchPower, objectiveCount, isTreatGoal, isMudGoal, completesObjective }) {
+  if (completesObjective) {
+    return { sound: null, feedback: null, suppressFall: true };
+  }
+
+  if (cascadeIndex > 0) {
+    return {
+      sound: getCascadeSound(cascadeIndex),
+      feedback: getCascadeFeedback(cascadeIndex),
+      suppressFall: true,
+    };
+  }
+
+  if (objectiveCount > 0) {
+    return {
+      sound: isMudGoal ? getMatchSound(matchPower) : 'goal',
+      feedback: getObjectiveFeedback({ objectiveCount, isTreatGoal, isMudGoal }),
+      suppressFall: false,
+    };
+  }
+
+  if (matchPower >= 4) {
+    return {
+      sound: 'special',
+      feedback: getMatchFeedback(matchPower),
+      suppressFall: false,
+    };
+  }
+
+  return {
+    sound: 'pop',
+    feedback: null,
+    suppressFall: false,
+  };
+}
+
+function getMatchSound(matchPower) {
+  return matchPower >= 4 ? 'special' : 'pop';
+}
+
+function getCascadeSound(cascadeIndex) {
   if (cascadeIndex >= 3) {
-    return { text: 'WOOF-TASTIC!', tone: 'combo-max' };
+    return 'unbelievable';
   }
 
   if (cascadeIndex === 2) {
-    return { text: 'COLA COMBO!', tone: 'combo' };
+    return 'amazing';
   }
 
   if (cascadeIndex === 1) {
-    return { text: 'AGAIN!', tone: 'cascade' };
+    return 'epic';
   }
 
+  return 'epic';
+}
+
+function getCascadeFeedback(cascadeIndex) {
+  if (cascadeIndex >= 3) {
+    return { text: 'UNBELIEVABLE!', tone: 'combo-max' };
+  }
+
+  if (cascadeIndex === 2) {
+    return { text: 'AMAZING!', tone: 'combo' };
+  }
+
+  return { text: 'EPIC!', tone: 'cascade' };
+}
+
+function getMatchFeedback(matchPower) {
   if (matchPower >= 5) {
     return { text: 'PAWSOME!', tone: 'pawsome' };
   }
@@ -830,28 +902,14 @@ function getMatchFeedback(matchPower, cascadeIndex) {
   return null;
 }
 
-function getTreatFeedback(treatCount, cascadeIndex) {
-  if (cascadeIndex > 0) {
-    return { text: 'TREAT COMBO!', tone: 'combo' };
+function getObjectiveFeedback({ objectiveCount, isTreatGoal, isMudGoal }) {
+  if (isTreatGoal) {
+    return objectiveCount > 1
+      ? { text: 'TREAT TIME!', tone: 'pawsome' }
+      : { text: 'TREAT!', tone: 'nice' };
   }
 
-  if (treatCount > 1) {
-    return { text: 'TREAT TIME!', tone: 'pawsome' };
-  }
-
-  return { text: 'TREAT!', tone: 'nice' };
-}
-
-function getMudFeedback(mudCount, cascadeIndex, nextCollected = 0, objectiveTarget = Infinity) {
-  if (nextCollected >= objectiveTarget) {
-    return { text: 'SQUEAKY CLEAN!', tone: 'pawsome' };
-  }
-
-  if (cascadeIndex > 0) {
-    return { text: 'CLEAN COMBO!', tone: 'combo' };
-  }
-
-  if (mudCount > 1) {
+  if (isMudGoal && objectiveCount > 1) {
     return { text: 'SQUEAKY CLEAN!', tone: 'pawsome' };
   }
 

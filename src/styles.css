@@ -1109,7 +1109,7 @@ h2 {
 }
 
 .victory-card {
-  width: min(430px, 100%);
+  width: min(460px, 100%);
   gap: 10px;
 }
 
@@ -1131,7 +1131,7 @@ h2 {
 }
 
 .victory-mascot {
-  width: min(170px, 48vw);
+  width: min(230px, 58vw);
   aspect-ratio: 2 / 3;
   object-fit: contain;
   filter: drop-shadow(0 14px 18px rgba(91, 58, 47, 0.18));
@@ -1139,7 +1139,7 @@ h2 {
 }
 
 .lose-mascot {
-  width: min(150px, 48vw);
+  width: min(210px, 56vw);
   aspect-ratio: 2 / 3;
   object-fit: contain;
   filter: drop-shadow(0 12px 16px rgba(91, 58, 47, 0.14));
@@ -1983,11 +1983,11 @@ h2 {
   }
 
   .victory-mascot {
-    width: min(128px, 42vw);
+    width: min(170px, 46vw);
   }
 
   .lose-mascot {
-    width: min(118px, 40vw);
+    width: min(158px, 44vw);
   }
 }
 

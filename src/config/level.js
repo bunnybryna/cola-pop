@@ -76,6 +76,10 @@ const SHARED_TIMING = {
   clear: 700,
   collectFly: 620,
   victoryPause: 1350,
+  victoryBarks: {
+    firstDelay: 900,
+    secondDelay: 520,
+  },
   fall: 320,
   cascadePause: 90,
 };
@@ -90,13 +94,17 @@ export const LEVELS = [
   moveLimit: 20,
   objective: {
     targetTileCount: 3,
-      targetCount: 24,
+      targetCount: 12,
   },
   story: {
     headline: 'The park is in bloom! 🌸',
     prompt: 'Match the three flower-colored Colas and collect',
     favoriteLead: 'Cola has favorites!',
     favoriteDetail: 'Match any color you like, but only these three count.',
+  },
+  completionImage: {
+    image: '/assets/level1complete.png',
+    label: 'Cola sitting happily among flowers',
   },
   boardObjects: [],
   scoring: SHARED_SCORING,
@@ -118,6 +126,10 @@ export const LEVELS = [
       prompt: 'Match next to treats to collect them.',
       favoriteLead: 'One match can grab multiple treats!',
       favoriteDetail: '',
+    },
+    completionImage: {
+      image: '/assets/level2complete.png',
+      label: 'Cola receiving a bone treat',
     },
     boardObjects: [
       {
@@ -153,6 +165,14 @@ export const LEVELS = [
       favoriteLead: 'Clean multiple spots with one match!',
       favoriteDetail: '',
     },
+    completionImage: {
+      image: '/assets/level3complete.png',
+      label: 'Cola sparkling clean after the mud is gone',
+    },
+    failureImage: {
+      image: '/assets/level3fail.png',
+      label: 'Cola still muddy',
+    },
     terrain: [
       {
         id: 'mud',
@@ -161,10 +181,25 @@ export const LEVELS = [
         count: 10,
         placement: {
           strategy: 'controlledRandom',
-          borderPadding: 1,
-          adjacentPairCount: 1,
-          adjacentPairDirection: 'horizontal',
+          layoutAttempts: 60,
+          borderPadding: 0,
+          avoidCorners: true,
+          adjacentPairCountRange: [2, 3],
+          minAdjacentPairs: 2,
+          maxAdjacentPairs: 3,
+          adjacentPairDirection: 'either',
           preferSameTilePair: true,
+          minPairAnchorDistance: 3,
+          maxPairExternalNeighbors: 0,
+          maxOrthogonalTerrainNeighbors: 0,
+          preferredRows: [2, 3, 4, 5],
+          minPreferredRowCount: 6,
+          preferredRowWeight: 5,
+          bottomRowWeight: 0.25,
+          maxBottomRow: 1,
+          maxSecondBottomRow: 1,
+          maxBottomTwoRows: 2,
+          minImmediatelyCleanable: 2,
           maxPerRow: 3,
           maxPerColumn: 3,
         },
