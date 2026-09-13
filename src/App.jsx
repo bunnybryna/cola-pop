@@ -8,8 +8,11 @@ import {
   canSwapCells,
   clearCells,
   clearObjects,
+  clearTileEntities,
   clearTerrain,
+  countEntities,
   findAdjacentObjects,
+  findBottomEntities,
   findMatchedTerrain,
   findMatches,
   getCollection,
@@ -17,10 +20,14 @@ import {
   makeInitialBoard,
   markCells,
   markObjects,
+  markTileEntities,
   markTerrain,
   resetTileStates,
+  reshuffleBoardForEntityFairness,
   reshuffleBoard,
   scoreMatches,
+  shouldImproveEntityNearBottom,
+  spawnGravityEntity,
   swapTiles,
 } from './game/match3.js';
 
@@ -36,6 +43,7 @@ function createGame(levelConfig) {
     moves: levelConfig.moveLimit,
     score: 0,
     collected: 0,
+    spawnedEntities: getInitialSpawnedEntityCount(levelConfig),
     status: 'playing',
     message: '',
   };
@@ -65,10 +73,12 @@ export default function App() {
   );
   const isTreatGoal = levelConfig.goalType === 'collectTreats';
   const isMudGoal = levelConfig.goalType === 'clearMud';
+  const isDropGoal = levelConfig.goalType === 'dropEntities';
   const objectiveObject = isTreatGoal ? objectLookup.get(levelConfig.objective.treatType) : null;
   const objectiveTerrain = isMudGoal
     ? (levelConfig.terrain ?? []).find((terrain) => terrain.id === levelConfig.objective.terrainType)
     : null;
+  const objectiveEntity = isDropGoal ? levelConfig.objective.asset : null;
   const objectiveTiles = game.targetTiles.map((tileId) => tileLookup.get(tileId)).filter(Boolean);
   const objectiveTileSet = useMemo(() => new Set(game.targetTiles), [game.targetTiles]);
   const objectiveTarget = getObjectiveTarget(levelConfig);
@@ -163,6 +173,7 @@ export default function App() {
       moves: nextMoves,
       score: game.score,
       collected: game.collected,
+      spawnedEntities: game.spawnedEntities,
     });
 
     const status = getStatus(resolved.collected, nextMoves, levelConfig);
@@ -199,6 +210,7 @@ export default function App() {
     let board = startBoard;
     let score = initialState.score;
     let collected = initialState.collected;
+    let spawnedEntities = initialState.spawnedEntities ?? getInitialSpawnedEntityCount(levelConfig);
     let cascadeIndex = 0;
 
     while (true) {
@@ -318,13 +330,53 @@ export default function App() {
       setGame((current) => ({ ...current, board, score, collected }));
       await sleep(levelConfig.timing.fall);
 
+      if (isDropGoal) {
+        const remainingNeeded = Math.max(0, objectiveTarget - collected);
+        const entityCells = findBottomEntities(board, levelConfig, levelConfig.objective.entityType).slice(0, remainingNeeded);
+
+        if (entityCells.length > 0) {
+          playSound('goal');
+          setMatchFeedback({ text: 'FETCH!', tone: 'nice', key: `${Date.now()}-${cascadeIndex}-fetch` });
+          reactMascot(collected + entityCells.length >= objectiveTarget ? 'victory' : 'goodMatch', 950);
+
+          const collectingBoard = markTileEntities(board, entityCells, 'collecting');
+          setGame((current) => ({ ...current, board: collectingBoard, score, collected }));
+          await sleep(220);
+          launchCollectFlyers(entityCells, board, { kind: 'entity', entityMeta: objectiveEntity });
+          await sleep(levelConfig.timing.collectFly);
+
+          collected = Math.min(objectiveTarget, collected + entityCells.length);
+          setProgressPulseKey(Date.now());
+          board = clearTileEntities(board, entityCells);
+          board = applyGravityAndRefill(board, levelConfig, TILE_TYPES);
+
+          if (
+            collected >= (levelConfig.objective.spawnAfterCollected ?? Infinity) &&
+            spawnedEntities < objectiveTarget &&
+            countEntities(board, levelConfig.objective.entityType) < objectiveTarget - collected
+          ) {
+            board = spawnGravityEntity(board, levelConfig, levelConfig.objective.entityType);
+            spawnedEntities += 1;
+          }
+
+          setGame((current) => ({ ...current, board, score, collected, spawnedEntities }));
+          await sleep(levelConfig.timing.fall);
+        }
+      }
+
       board = resetTileStates(board);
-      setGame((current) => ({ ...current, board, score, collected }));
+      setGame((current) => ({ ...current, board, score, collected, spawnedEntities }));
       await sleep(levelConfig.timing.cascadePause);
       cascadeIndex += 1;
     }
 
-    if (!hasPossibleMove(board, levelConfig)) {
+    if (isDropGoal && shouldImproveEntityNearBottom(board, levelConfig, levelConfig.objective.entityType)) {
+      setNotice('Shuffled');
+      board = reshuffleBoardForEntityFairness(board, levelConfig, TILE_TYPES, levelConfig.objective.entityType);
+      setGame((current) => ({ ...current, board }));
+      await sleep(levelConfig.timing.fall);
+      setNotice('');
+    } else if (!hasPossibleMove(board, levelConfig)) {
       setNotice('Shuffled');
       board = reshuffleBoard(board, levelConfig, TILE_TYPES);
       setGame((current) => ({ ...current, board }));
@@ -336,6 +388,7 @@ export default function App() {
       board: resetTileStates(board),
       score,
       collected,
+      spawnedEntities,
     };
   }
 
@@ -386,6 +439,7 @@ export default function App() {
   function launchCollectFlyers(cells, boardSnapshot, options = {}) {
     const targetRect = goalTargetRef.current?.getBoundingClientRect();
     const kind = options.kind ?? 'collectible';
+    const entityMeta = options.entityMeta;
 
     if (!targetRect) {
       return;
@@ -399,7 +453,7 @@ export default function App() {
         const boardCell = boardSnapshot[cell.row]?.[cell.col];
         const tile = boardCell?.tile;
         const object = boardCell?.object;
-        const meta = tile ? tileLookup.get(tile.type) : objectLookup.get(object?.type);
+        const meta = kind === 'entity' ? entityMeta : tile ? tileLookup.get(tile.type) : objectLookup.get(object?.type);
 
         if (!sourceRect || (kind !== 'mud-clean' && !meta)) {
           return null;
@@ -481,10 +535,10 @@ export default function App() {
             <div className="objective-heading">
               <span className="panel-label">
                 <PawPrint size={16} aria-hidden="true" />
-                {isTreatGoal || isMudGoal ? 'Goal' : "Cola's Favorites"}
+                {isTreatGoal || isMudGoal || isDropGoal ? 'Goal' : "Cola's Favorites"}
               </span>
             </div>
-            <div className={`goal-progress ${isTreatGoal || isMudGoal ? 'treat-goal-progress' : ''}`} ref={goalTargetRef}>
+            <div className={`goal-progress ${isTreatGoal || isMudGoal || isDropGoal ? 'treat-goal-progress' : ''}`} ref={goalTargetRef}>
               {isTreatGoal ? (
                 objectiveObject && (
                   <div className="goal-tiles" aria-label="Target treat">
@@ -498,6 +552,14 @@ export default function App() {
                   <div className="goal-tiles" aria-label="Target muddy spots">
                     <div className="goal-tile treat-goal-tile">
                       <img src={objectiveTerrain.identityImage} alt={objectiveTerrain.label} />
+                    </div>
+                  </div>
+                )
+              ) : isDropGoal ? (
+                objectiveEntity && (
+                  <div className="goal-tiles" aria-label="Target ball">
+                    <div className="goal-tile treat-goal-tile ball-goal-tile">
+                      <img src={objectiveEntity.image} alt={objectiveEntity.label} />
                     </div>
                   </div>
                 )
@@ -578,13 +640,16 @@ export default function App() {
                   return <div className="tile empty-cell" key={`${rowIndex}:${colIndex}`} aria-hidden="true" />;
                 }
 
-                const meta = tileLookup.get(tile.type);
+                const meta = getTileMeta(tile, tileLookup, levelConfig);
                 const terrain = cell.terrain;
                 const isSelected = selected?.row === rowIndex && selected?.col === colIndex;
+                const isEntityTile = Boolean(tile.entity);
 
                 return (
                   <button
-                    className={`tile ${terrain ? `terrain-${terrain.type} ${terrain.state}` : ''} ${
+                    className={`tile ${isEntityTile ? `entity-tile entity-${tile.entity}` : ''} ${
+                      terrain ? `terrain-${terrain.type} ${terrain.state}` : ''
+                    } ${
                       isSelected ? 'selected' : ''
                     } ${tile.state} ${
                       tile.matchPower ? `match-${tile.matchPower}` : ''
@@ -600,8 +665,9 @@ export default function App() {
                     }}
                     type="button"
                     onClick={() => handleTileClick(rowIndex, colIndex)}
+                    disabled={isEntityTile}
                     style={{ '--tile-color': meta.color }}
-                    aria-label={`${meta.label} tile at row ${rowIndex + 1}, column ${colIndex + 1}${
+                    aria-label={`${meta.label} ${isEntityTile ? 'at' : 'tile at'} row ${rowIndex + 1}, column ${colIndex + 1}${
                       terrain?.type === 'mud' ? ', on mud' : ''
                     }`}
                   >
@@ -707,7 +773,15 @@ export default function App() {
           );
         }
 
-        return <img className="collect-flyer" key={flyer.id} src={flyer.image} alt="" style={flyerStyle} />;
+        return (
+          <img
+            className={`collect-flyer ${flyer.kind === 'entity' ? 'entity-flyer' : ''}`}
+            key={flyer.id}
+            src={flyer.image}
+            alt=""
+            style={flyerStyle}
+          />
+        );
       })}
 
       <div className={`completion-spark ${objectiveComplete ? 'show' : ''}`}>Goal complete</div>
@@ -795,6 +869,10 @@ function getObjectiveNoun(levelConfig) {
     return 'muddy spots';
   }
 
+  if (levelConfig.goalType === 'dropEntities') {
+    return 'balls';
+  }
+
   return 'Colas';
 }
 
@@ -804,6 +882,18 @@ function getObjectiveVerb(levelConfig) {
   }
 
   return 'collected';
+}
+
+function getInitialSpawnedEntityCount(levelConfig) {
+  return (levelConfig.gravityEntities ?? []).reduce((total, entity) => total + (entity.count ?? 0), 0);
+}
+
+function getTileMeta(tile, tileLookup, levelConfig) {
+  if (tile?.entity && levelConfig.objective?.entityType === tile.entity) {
+    return levelConfig.objective.asset;
+  }
+
+  return tileLookup.get(tile.type);
 }
 
 function getResultArtwork(levelConfig, status) {
@@ -892,7 +982,7 @@ function getCascadeSound(cascadeIndex) {
 
 function getCascadeFeedback(cascadeIndex) {
   if (cascadeIndex >= 3) {
-    return { text: 'UNBELIEVABLE!', tone: 'combo-max' };
+    return { text: 'LEGENDARY!', tone: 'combo-max' };
   }
 
   if (cascadeIndex === 2) {

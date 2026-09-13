@@ -52,7 +52,13 @@ export function createBoardWithoutMatches(config, tileTypes) {
     return null;
   }
 
-  return placeTerrain(boardWithObjects, config);
+  const boardWithGravityEntities = placeGravityEntities(boardWithObjects, config);
+
+  if (!boardWithGravityEntities) {
+    return null;
+  }
+
+  return placeTerrain(boardWithGravityEntities, config);
 }
 
 export function createRandomTile(tileTypes, blocked = new Set()) {
@@ -79,7 +85,7 @@ export function swapTiles(board, a, b) {
 }
 
 export function canSwapCells(board, a, b) {
-  return Boolean(getCellTile(board[a.row]?.[a.col]) && getCellTile(board[b.row]?.[b.col]));
+  return Boolean(isSwappableTile(getCellTile(board[a.row]?.[a.col])) && isSwappableTile(getCellTile(board[b.row]?.[b.col])));
 }
 
 export function findMatches(board, config) {
@@ -90,8 +96,8 @@ export function findMatches(board, config) {
     let run = [{ row, col: 0 }];
 
     for (let col = 1; col <= config.width; col += 1) {
-      const current = getCellTile(board[row][col]);
-      const previous = getCellTile(board[row][col - 1]);
+      const current = getMatchableTile(board[row][col]);
+      const previous = getMatchableTile(board[row][col - 1]);
 
       if (current && previous && current.type === previous.type) {
         run.push({ row, col });
@@ -106,8 +112,8 @@ export function findMatches(board, config) {
     let run = [{ row: 0, col }];
 
     for (let row = 1; row <= config.height; row += 1) {
-      const current = getCellTile(board[row]?.[col]);
-      const previous = getCellTile(board[row - 1]?.[col]);
+      const current = getMatchableTile(board[row]?.[col]);
+      const previous = getMatchableTile(board[row - 1]?.[col]);
 
       if (current && previous && current.type === previous.type) {
         run.push({ row, col });
@@ -240,6 +246,91 @@ export function clearTerrain(board, cells) {
   return next;
 }
 
+export function findBottomEntities(board, config, entityType) {
+  const bottomRow = config.height - 1;
+  const found = [];
+
+  for (let col = 0; col < config.width; col += 1) {
+    const tile = getCellTile(board[bottomRow]?.[col]);
+
+    if (tile?.entity === entityType && tile.state !== 'collecting') {
+      found.push({ row: bottomRow, col });
+    }
+  }
+
+  return found;
+}
+
+export function countEntities(board, entityType) {
+  let count = 0;
+
+  for (const row of board) {
+    for (const cell of row) {
+      if (getCellTile(cell)?.entity === entityType) {
+        count += 1;
+      }
+    }
+  }
+
+  return count;
+}
+
+export function markTileEntities(board, cells, state, extra = {}) {
+  const marked = cloneBoard(board);
+
+  for (const cell of cells) {
+    const tile = getCellTile(marked[cell.row]?.[cell.col]);
+
+    if (tile?.entity) {
+      marked[cell.row][cell.col].tile = {
+        ...tile,
+        state,
+        ...extra,
+      };
+    }
+  }
+
+  return marked;
+}
+
+export function clearTileEntities(board, cells) {
+  const next = cloneBoard(board);
+
+  for (const cell of cells) {
+    const tile = getCellTile(next[cell.row]?.[cell.col]);
+
+    if (tile?.entity) {
+      next[cell.row][cell.col].tile = null;
+    }
+  }
+
+  return next;
+}
+
+export function spawnGravityEntity(board, config, entityType) {
+  const entityConfig = (config.gravityEntities ?? []).find((entity) => entity.id === entityType);
+
+  if (!entityConfig) {
+    return board;
+  }
+
+  const next = cloneBoard(board);
+  const candidates = getGravityEntityPlacementCandidates(next, config, entityConfig, true);
+  const existingEntities = getEntityCells(next, entityType);
+  const spacedCandidates = candidates.filter((cell) =>
+    existingEntities.every((existing) => existing.col !== cell.col && getManhattanDistance(cell, existing) > 1),
+  );
+  const candidatePool = spacedCandidates.length > 0 ? spacedCandidates : candidates;
+
+  if (candidatePool.length === 0) {
+    return board;
+  }
+
+  const { row, col } = pickWeightedGravityEntityCandidate(candidatePool, config, entityConfig);
+  next[row][col].tile = createGravityEntityTile(entityConfig, 'entering');
+  return next;
+}
+
 export function applyGravityAndRefill(board, config, tileTypes) {
   const next = board.map((row) => row.map((cell) => createCell(null, cell.object, cell.terrain)));
 
@@ -314,7 +405,7 @@ export function reshuffleBoard(board, config, tileTypes) {
     for (const cell of row) {
       const tile = getCellTile(cell);
 
-      if (!tile) {
+      if (!tile || tile.entity) {
         continue;
       }
 
@@ -336,7 +427,9 @@ export function reshuffleBoard(board, config, tileTypes) {
 
     shuffled = board.map((row) =>
       row.map((cell) =>
-        getCellTile(cell)
+        getCellTile(cell)?.entity
+          ? createCell({ ...cell.tile, state: 'idle' }, cell.object, cell.terrain)
+          : getCellTile(cell)
           ? createCell(pool.splice(Math.floor(Math.random() * pool.length), 1)[0], cell.object, cell.terrain)
           : createCell(null, cell.object, cell.terrain),
       ),
@@ -350,6 +443,30 @@ export function reshuffleBoard(board, config, tileTypes) {
   }
 
   return shuffled;
+}
+
+export function shouldImproveEntityNearBottom(board, config, entityType) {
+  const entityCells = getEntityCells(board, entityType);
+
+  return entityCells.some(
+    (cell) => cell.row >= config.height - 3 && !hasUsefulMoveForEntityNearBottom(board, config, cell),
+  );
+}
+
+export function reshuffleBoardForEntityFairness(board, config, tileTypes, entityType) {
+  let fallback = reshuffleBoard(board, config, tileTypes);
+
+  for (let attempt = 0; attempt < 20; attempt += 1) {
+    const candidate = reshuffleBoard(board, config, tileTypes);
+
+    if (!shouldImproveEntityNearBottom(candidate, config, entityType)) {
+      return candidate;
+    }
+
+    fallback = fallback ?? candidate;
+  }
+
+  return fallback ?? board;
 }
 
 export function getCollection(matches, board) {
@@ -418,6 +535,48 @@ function placeBoardObjects(board, config) {
     }
 
     if (placedForObject < objectConfig.count) {
+      return null;
+    }
+  }
+
+  return next;
+}
+
+function placeGravityEntities(board, config) {
+  const entities = config.gravityEntities ?? [];
+
+  if (entities.length === 0) {
+    return board;
+  }
+
+  const next = cloneBoard(board);
+  const placedCells = [];
+  const occupiedColumns = new Set();
+
+  for (const entityConfig of entities) {
+    let candidates = getGravityEntityPlacementCandidates(next, config, entityConfig, false);
+    let placedForEntity = 0;
+
+    for (let index = 0; index < entityConfig.count && candidates.length > 0; index += 1) {
+      const validCandidates = candidates.filter(
+        (cell) =>
+          !occupiedColumns.has(cell.col) &&
+          placedCells.every((placedCell) => getManhattanDistance(cell, placedCell) > 1),
+      );
+
+      if (validCandidates.length === 0) {
+        break;
+      }
+
+      const picked = pickWeightedGravityEntityCandidate(validCandidates, config, entityConfig);
+      next[picked.row][picked.col].tile = createGravityEntityTile(entityConfig);
+      placedCells.push(picked);
+      occupiedColumns.add(picked.col);
+      candidates = candidates.filter((cell) => makeCellKey(cell) !== makeCellKey(picked));
+      placedForEntity += 1;
+    }
+
+    if (placedForEntity < entityConfig.count) {
       return null;
     }
   }
@@ -548,6 +707,13 @@ function makeBoardFromObjectLayout(sourceBoard, config, tileTypes) {
           continue;
         }
 
+        const sourceTile = sourceBoard[row]?.[col]?.tile;
+
+        if (sourceTile?.entity) {
+          boardRow.push(createCell({ ...sourceTile, state: 'idle' }, null, terrain ? { ...terrain } : null));
+          continue;
+        }
+
         const blocked = new Set();
         const leftOne = getCellTile(boardRow[col - 1]);
         const leftTwo = getCellTile(boardRow[col - 2]);
@@ -599,6 +765,82 @@ function fillColumnSegment(board, next, col, segmentTop, segmentBottom, tileType
       state: 'entering',
     };
   }
+}
+
+function getGravityEntityPlacementCandidates(board, config, entityConfig, forSpawn) {
+  const candidates = [];
+
+  for (let row = 0; row < config.height; row += 1) {
+    for (let col = 0; col < config.width; col += 1) {
+      const cell = { row, col };
+
+      if (isGravityEntityPlacementCell(board, cell, config, entityConfig, forSpawn)) {
+        candidates.push(cell);
+      }
+    }
+  }
+
+  return candidates;
+}
+
+function isGravityEntityPlacementCell(board, cell, config, entityConfig, forSpawn) {
+  const placement = entityConfig.placement ?? {};
+  const minRow = forSpawn ? (placement.spawnMinRow ?? 0) : (placement.minRow ?? 0);
+  const maxRow = forSpawn
+    ? (placement.spawnMaxRow ?? Math.min(2, config.height - 3))
+    : (placement.maxRow ?? config.height - 3);
+  const boardCell = board[cell.row]?.[cell.col];
+
+  return (
+    cell.row >= minRow &&
+    cell.row <= maxRow &&
+    cell.row < config.height - (placement.minRowsBelow ?? 2) &&
+    cell.col >= (placement.minCol ?? 0) &&
+    cell.col <= (placement.maxCol ?? config.width - 1) &&
+    !isForbiddenGravityEntityCell(cell, config, entityConfig) &&
+    Boolean(boardCell?.tile) &&
+    isMatchableTile(boardCell.tile) &&
+    !boardCell.object
+  );
+}
+
+function isForbiddenGravityEntityCell(cell, config, entityConfig) {
+  if (!entityConfig.placement?.avoidCorners) {
+    return false;
+  }
+
+  const isTopOrBottom = cell.row === 0 || cell.row === config.height - 1;
+  const isLeftOrRight = cell.col === 0 || cell.col === config.width - 1;
+
+  return isTopOrBottom && isLeftOrRight;
+}
+
+function pickWeightedGravityEntityCandidate(candidates, config, entityConfig) {
+  const preferredRows = entityConfig.placement?.preferredRows ?? [];
+  const weights = candidates.map((candidate) => (preferredRows.includes(candidate.row) ? 4 : 1));
+  const totalWeight = weights.reduce((total, weight) => total + weight, 0);
+  let threshold = Math.random() * totalWeight;
+
+  for (let index = 0; index < candidates.length; index += 1) {
+    threshold -= weights[index];
+
+    if (threshold <= 0) {
+      return candidates[index];
+    }
+  }
+
+  return candidates[candidates.length - 1];
+}
+
+function createGravityEntityTile(entityConfig, state = 'idle') {
+  return {
+    key: crypto.randomUUID(),
+    type: entityConfig.id,
+    entity: entityConfig.entity ?? entityConfig.id,
+    state,
+    matchable: false,
+    swappable: false,
+  };
 }
 
 function getObjectPlacementCandidates(config, objectConfig) {
@@ -979,6 +1221,62 @@ function getTerrainCells(board, terrainType) {
   return cells;
 }
 
+function getEntityCells(board, entityType) {
+  const cells = [];
+
+  for (let row = 0; row < board.length; row += 1) {
+    for (let col = 0; col < board[row].length; col += 1) {
+      if (getCellTile(board[row][col])?.entity === entityType) {
+        cells.push({ row, col });
+      }
+    }
+  }
+
+  return cells;
+}
+
+function hasUsefulMoveForEntityNearBottom(board, config, entityCell) {
+  const bottomTwoStart = config.height - 2;
+  const minRelevantRow = Math.max(entityCell.row, bottomTwoStart);
+  const minCol = Math.max(0, entityCell.col - 1);
+  const maxCol = Math.min(config.width - 1, entityCell.col + 1);
+
+  for (let row = Math.max(0, entityCell.row - 1); row < config.height; row += 1) {
+    for (let col = 0; col < config.width; col += 1) {
+      const current = { row, col };
+      const candidates = [
+        { row, col: col + 1 },
+        { row: row + 1, col },
+      ];
+
+      for (const target of candidates) {
+        if (target.row >= config.height || target.col >= config.width || !canSwapCells(board, current, target)) {
+          continue;
+        }
+
+        const touchesBottomTwo = current.row >= bottomTwoStart || target.row >= bottomTwoStart;
+        const nearEntityColumn =
+          (current.col >= minCol && current.col <= maxCol) || (target.col >= minCol && target.col <= maxCol);
+
+        if (!touchesBottomTwo && !nearEntityColumn) {
+          continue;
+        }
+
+        const matches = findMatches(swapTiles(board, current, target), config);
+        const clearsRelevantPath = matches.cells.some(
+          (cell) => cell.row >= minRelevantRow && cell.col >= minCol && cell.col <= maxCol,
+        );
+
+        if ((touchesBottomTwo || nearEntityColumn) && clearsRelevantPath) {
+          return true;
+        }
+      }
+    }
+  }
+
+  return false;
+}
+
 function getTerrainRowCounts(board, terrainType) {
   const counts = new Map();
 
@@ -1022,14 +1320,14 @@ function pushMatch(run, board, matched, groups) {
     return;
   }
 
-  const cells = run.filter((cell) => getCellTile(board[cell.row]?.[cell.col]));
+  const cells = run.filter((cell) => getMatchableTile(board[cell.row]?.[cell.col]));
 
   for (const cell of cells) {
     matched.add(makeCellKey(cell));
   }
 
   groups.push({
-    type: getCellTile(board[cells[0].row][cells[0].col]).type,
+    type: getMatchableTile(board[cells[0].row][cells[0].col]).type,
     cells,
   });
 }
@@ -1078,4 +1376,17 @@ function createCell(tile = null, object = null, terrain = null) {
 
 function getCellTile(cell) {
   return cell?.tile ?? null;
+}
+
+function getMatchableTile(cell) {
+  const tile = getCellTile(cell);
+  return isMatchableTile(tile) ? tile : null;
+}
+
+function isMatchableTile(tile) {
+  return Boolean(tile && tile.matchable !== false && !tile.entity);
+}
+
+function isSwappableTile(tile) {
+  return Boolean(isMatchableTile(tile) && tile.swappable !== false);
 }

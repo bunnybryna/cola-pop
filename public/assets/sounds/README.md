@@ -27,7 +27,7 @@ Gameplay events also route through these sound IDs:
 
 - `epic`: cascade x2
 - `amazing`: cascade x3
-- `unbelievable`: cascade x4+
+- `unbelievable`: cascade x4+; displays `LEGENDARY!`
 - `bark-happy`: victory only
 - `wah-wah-sad`: level failed
 - muddy spot cleaned: uses objective progress sound (`goal`)

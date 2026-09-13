@@ -84,7 +84,11 @@ const SHARED_TIMING = {
   cascadePause: 90,
 };
 
-export const LEVELS = [
+// Set to null for normal progression. Set to a level number to make earlier goals quick for testing.
+const TEST_FAST_FORWARD_TO_LEVEL = null;
+const TEST_PREVIOUS_LEVEL_TARGET = 1;
+
+const BASE_LEVELS = [
   {
   level: 1,
   name: 'A Walk in the Park',
@@ -116,7 +120,7 @@ export const LEVELS = [
     goalType: 'collectTreats',
     width: 8,
     height: 8,
-    moveLimit: 3,
+    moveLimit: 20,
     objective: {
       treatType: 'bone',
       treatCount: 6,
@@ -213,6 +217,107 @@ export const LEVELS = [
     scoring: SHARED_SCORING,
     timing: SHARED_TIMING,
   },
+  {
+    level: 4,
+    name: 'Fetch!',
+    goalType: 'dropEntities',
+    width: 8,
+    height: 8,
+    moveLimit: 24,
+    objective: {
+      entityType: 'fetch_ball',
+      targetCount: 2,
+      spawnAfterCollected: 1,
+      asset: {
+        id: 'fetch_ball',
+        label: 'Play On! Ball',
+        image: '/assets/tiles/ball.png',
+        color: '#ff9f43',
+      },
+    },
+    story: {
+      headline: 'Cola wants to play fetch!',
+      prompt: 'Clear the way and drop the balls to the bottom.',
+      favoriteLead: 'Match below a ball to help it fall!',
+      favoriteDetail: '',
+    },
+    completionImage: {
+      image: '/assets/level4complete.png',
+      label: 'Cola celebrating after fetch',
+    },
+    failureImage: {
+      image: '/assets/level4fail.png',
+      label: 'Cola still waiting to fetch the ball',
+    },
+    gravityEntities: [
+      {
+        id: 'fetch_ball',
+        entity: 'fetch_ball',
+        label: 'Play On! Ball',
+        image: '/assets/tiles/ball.png',
+        count: 1,
+        placement: {
+          avoidCorners: true,
+          minRowsBelow: 2,
+          minCol: 2,
+          maxCol: 5,
+          minRow: 0,
+          maxRow: 0,
+          preferredRows: [0],
+          spawnMinRow: 2,
+          spawnMaxRow: 3,
+          spawnPreferredRows: [2, 3],
+        },
+      },
+    ],
+    boardObjects: [],
+    scoring: SHARED_SCORING,
+    timing: SHARED_TIMING,
+  },
 ];
 
+export const LEVELS = applyTestGoalOverrides(BASE_LEVELS);
 export const LEVEL_CONFIG = LEVELS[0];
+
+function applyTestGoalOverrides(levels) {
+  if (!TEST_FAST_FORWARD_TO_LEVEL) {
+    return levels;
+  }
+
+  return levels.map((level) => {
+    if (level.level >= TEST_FAST_FORWARD_TO_LEVEL) {
+      return level;
+    }
+
+    return {
+      ...level,
+      objective: getTestObjective(level),
+    };
+  });
+}
+
+function getTestObjective(level) {
+  if (level.goalType === 'collectTiles') {
+    return {
+      ...level.objective,
+      targetTileCount: 1,
+      targetCount: TEST_PREVIOUS_LEVEL_TARGET,
+    };
+  }
+
+  if (level.goalType === 'collectTreats') {
+    return {
+      ...level.objective,
+      treatCount: TEST_PREVIOUS_LEVEL_TARGET,
+    };
+  }
+
+  if (level.goalType === 'clearMud') {
+    return {
+      ...level.objective,
+      targetCount: TEST_PREVIOUS_LEVEL_TARGET,
+    };
+  }
+
+  return level.objective;
+}
