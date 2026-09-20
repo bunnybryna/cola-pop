@@ -85,7 +85,7 @@ const SHARED_TIMING = {
 };
 
 // Set to null for normal progression. Set to a level number to make earlier goals quick for testing.
-const TEST_FAST_FORWARD_TO_LEVEL = 4;
+const TEST_FAST_FORWARD_TO_LEVEL = null;
 const TEST_PREVIOUS_LEVEL_TARGET = 1;
 
 const BASE_LEVELS = [
