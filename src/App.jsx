@@ -15,6 +15,8 @@ import {
   findBottomEntities,
   findMatchedTerrain,
   findMatches,
+  getEntityPositions,
+  hasUsefulMoveForEntityProgress,
   getCollection,
   hasPossibleMove,
   makeInitialBoard,
@@ -23,10 +25,9 @@ import {
   markTileEntities,
   markTerrain,
   resetTileStates,
-  reshuffleBoardForEntityFairness,
   reshuffleBoard,
+  reshuffleTilesNearEntity,
   scoreMatches,
-  shouldImproveEntityNearBottom,
   spawnGravityEntity,
   swapTiles,
 } from './game/match3.js';
@@ -44,6 +45,8 @@ function createGame(levelConfig) {
     score: 0,
     collected: 0,
     spawnedEntities: getInitialSpawnedEntityCount(levelConfig),
+    stalledEntityMoves: {},
+    assistedShuffleUsed: false,
     status: 'playing',
     message: '',
   };
@@ -57,6 +60,7 @@ export default function App() {
   const [busy, setBusy] = useState(false);
   const [notice, setNotice] = useState('');
   const [matchFeedback, setMatchFeedback] = useState(null);
+  const [shuffleFeedback, setShuffleFeedback] = useState(null);
   const [collectFlyers, setCollectFlyers] = useState([]);
   const [progressPulseKey, setProgressPulseKey] = useState(0);
   const [movesCallout, setMovesCallout] = useState(null);
@@ -65,6 +69,7 @@ export default function App() {
   const tileRefs = useRef(new Map());
   const goalTargetRef = useRef(null);
   const mascotTimerRef = useRef(null);
+  const inputLockedRef = useRef(false);
 
   const tileLookup = useMemo(() => new Map(TILE_TYPES.map((tile) => [tile.id, tile])), []);
   const objectLookup = useMemo(
@@ -104,7 +109,7 @@ export default function App() {
     );
 
   async function handleTileClick(row, col) {
-    if (busy || game.status !== 'playing') {
+    if (inputLockedRef.current || busy || game.status !== 'playing') {
       return;
     }
 
@@ -133,6 +138,11 @@ export default function App() {
   }
 
   async function attemptSwap(from, to) {
+    if (inputLockedRef.current) {
+      return;
+    }
+
+    inputLockedRef.current = true;
     setBusy(true);
     setSelected(null);
 
@@ -151,30 +161,25 @@ export default function App() {
       reactMascot('invalidSwap', 900);
       setGame((current) => ({
         ...current,
-        moves: nextMoves,
         board: markCells(swapped, [from, to], 'invalid'),
       }));
       await sleep(levelConfig.timing.invalidSwap);
-      const status = getStatus(game.collected, nextMoves, levelConfig);
-      if (status === 'lost') {
-        playSound('wah-wah-sad');
-      }
       setGame((current) => ({
         ...current,
         board: resetTileStates(swapTiles(swapped, from, to)),
-        status,
-        message: getEndMessage(status),
       }));
+      inputLockedRef.current = false;
       setBusy(false);
       return;
     }
 
-    const resolved = await resolveMatches(swapped, {
+    let resolved = await resolveMatches(swapped, {
       moves: nextMoves,
       score: game.score,
       collected: game.collected,
       spawnedEntities: game.spawnedEntities,
     });
+    resolved = spawnTimedDropEntityIfNeeded(resolved, nextMoves);
 
     const status = getStatus(resolved.collected, nextMoves, levelConfig);
     if (status === 'won') {
@@ -190,12 +195,23 @@ export default function App() {
         message: getEndMessage(status),
       }));
       await playVictoryBarks(levelConfig);
+      inputLockedRef.current = false;
       setBusy(false);
       return;
     }
     if (status === 'lost') {
       playSound('wah-wah-sad');
+      setGame((current) => ({
+        ...current,
+        ...resolved,
+        moves: nextMoves,
+        status,
+        message: getEndMessage(status),
+      }));
+      setBusy(false);
+      return;
     }
+    resolved = await maybeApplyAssistedShuffle(resolved, nextMoves);
     setGame((current) => ({
       ...current,
       ...resolved,
@@ -203,6 +219,7 @@ export default function App() {
       status,
       message: getEndMessage(status),
     }));
+    inputLockedRef.current = false;
     setBusy(false);
   }
 
@@ -234,6 +251,9 @@ export default function App() {
             : getTargetCollectionCount(collection, objectiveTileSet);
       const nextCollected = collected + targetCollectionCount;
       const completesObjective = nextCollected >= objectiveTarget;
+      if (completesObjective && targetCollectionCount > 0) {
+        lockTerminalObjectiveResolution();
+      }
       const targetCells =
         isTreatGoal
           ? treatCells
@@ -346,6 +366,9 @@ export default function App() {
           await sleep(levelConfig.timing.collectFly);
 
           collected = Math.min(objectiveTarget, collected + entityCells.length);
+          if (collected >= objectiveTarget) {
+            lockTerminalObjectiveResolution();
+          }
           setProgressPulseKey(Date.now());
           board = clearTileEntities(board, entityCells);
           board = applyGravityAndRefill(board, levelConfig, TILE_TYPES);
@@ -370,13 +393,7 @@ export default function App() {
       cascadeIndex += 1;
     }
 
-    if (isDropGoal && shouldImproveEntityNearBottom(board, levelConfig, levelConfig.objective.entityType)) {
-      setNotice('Shuffled');
-      board = reshuffleBoardForEntityFairness(board, levelConfig, TILE_TYPES, levelConfig.objective.entityType);
-      setGame((current) => ({ ...current, board }));
-      await sleep(levelConfig.timing.fall);
-      setNotice('');
-    } else if (!hasPossibleMove(board, levelConfig)) {
+    if (!hasPossibleMove(board, levelConfig)) {
       setNotice('Shuffled');
       board = reshuffleBoard(board, levelConfig, TILE_TYPES);
       setGame((current) => ({ ...current, board }));
@@ -392,6 +409,119 @@ export default function App() {
     };
   }
 
+  function spawnTimedDropEntityIfNeeded(resolvedState, nextMoves) {
+    if (!isDropGoal) {
+      return resolvedState;
+    }
+
+    const spawnAfterMovesUsed = levelConfig.objective.spawnAfterMovesUsed;
+
+    if (!spawnAfterMovesUsed) {
+      return resolvedState;
+    }
+
+    const movesUsed = levelConfig.moveLimit - nextMoves;
+    const spawnedEntities = resolvedState.spawnedEntities ?? getInitialSpawnedEntityCount(levelConfig);
+
+    if (
+      movesUsed < spawnAfterMovesUsed ||
+      resolvedState.collected >= objectiveTarget ||
+      spawnedEntities >= objectiveTarget
+    ) {
+      return resolvedState;
+    }
+
+    const activeEntities = countEntities(resolvedState.board, levelConfig.objective.entityType);
+
+    if (activeEntities >= objectiveTarget - resolvedState.collected) {
+      return resolvedState;
+    }
+
+    const boardWithTimedSpawn = spawnGravityEntity(resolvedState.board, levelConfig, levelConfig.objective.entityType);
+
+    if (boardWithTimedSpawn === resolvedState.board) {
+      return resolvedState;
+    }
+
+    return {
+      ...resolvedState,
+      board: boardWithTimedSpawn,
+      spawnedEntities: spawnedEntities + 1,
+    };
+  }
+
+  async function maybeApplyAssistedShuffle(resolvedState, nextMoves) {
+    if (!isDropGoal || game.assistedShuffleUsed) {
+      return {
+        ...resolvedState,
+        stalledEntityMoves: {},
+        assistedShuffleUsed: game.assistedShuffleUsed,
+      };
+    }
+
+    const entityType = levelConfig.objective.entityType;
+    const progressedEntityKeys = getProgressedEntityKeys(game.board, resolvedState.board, entityType);
+    const currentEntities = getEntityPositions(resolvedState.board, entityType);
+    const stalledEntityMoves = getNextStalledEntityMoves({
+      entities: currentEntities,
+      progressedEntityKeys,
+      previousStalledMoves: game.stalledEntityMoves,
+      levelConfig,
+    });
+    const shouldEmergencyCheck = nextMoves <= 2;
+    const targetEntity = currentEntities
+      .filter(
+        (cell) =>
+          isAssistedShuffleZoneCell(cell, levelConfig) &&
+          (shouldEmergencyCheck || (stalledEntityMoves[cell.key] ?? 0) >= 3) &&
+          !hasUsefulMoveForEntityProgress(resolvedState.board, levelConfig, entityType, cell.key),
+      )
+      .sort((a, b) => b.row - a.row || (stalledEntityMoves[b.key] ?? 0) - (stalledEntityMoves[a.key] ?? 0))[0];
+
+    if (!targetEntity) {
+      return {
+        ...resolvedState,
+        stalledEntityMoves,
+        assistedShuffleUsed: false,
+      };
+    }
+
+    const assistedShuffle = reshuffleTilesNearEntity(resolvedState.board, levelConfig, entityType, {
+      targetEntityKey: targetEntity.key,
+    });
+
+    if (!assistedShuffle) {
+      return {
+        ...resolvedState,
+        stalledEntityMoves,
+        assistedShuffleUsed: false,
+      };
+    }
+
+    setShuffleFeedback({
+      key: Date.now(),
+      title: 'PAW-SHUFFLE! 🐾',
+      message: 'Cola mixed things up! Try a new match.',
+    });
+    playSound('paw-shuffle');
+    window.setTimeout(() => setShuffleFeedback(null), 3000);
+    setGame((current) => ({
+      ...current,
+      ...resolvedState,
+      board: assistedShuffle.board,
+      stalledEntityMoves: {},
+      assistedShuffleUsed: true,
+    }));
+    await sleep(620);
+
+    return {
+      ...resolvedState,
+      board: resetTileStates(assistedShuffle.board),
+      stalledEntityMoves: {},
+      assistedShuffleUsed: true,
+    };
+  }
+
   async function playVictoryBarks(config) {
     const timing = config.timing.victoryBarks ?? { firstDelay: 900, secondDelay: 520 };
 
@@ -399,6 +529,14 @@ export default function App() {
     playSound('bark-happy');
     await sleep(timing.secondDelay);
     playSound('bark-happy');
+  }
+
+  function lockTerminalObjectiveResolution() {
+    inputLockedRef.current = true;
+    setGame((current) => ({
+      ...current,
+      status: current.status === 'playing' ? 'resolving' : current.status,
+    }));
   }
 
   function restart() {
@@ -415,6 +553,7 @@ export default function App() {
 
   function startLevel(levelIndex) {
     const nextLevel = LEVELS[levelIndex] ?? LEVELS[0];
+    inputLockedRef.current = false;
     setActiveLevelIndex(levelIndex);
     setGame(createGame(nextLevel));
     setSelected(null);
@@ -502,6 +641,9 @@ export default function App() {
           <p className="game-tagline">Match. Play. Wag.</p>
           </div>
         </div>
+        <button className="icon-button mobile-header-reset" type="button" onClick={restart} aria-label="Restart level" title="Restart level">
+          <RotateCcw size={20} />
+        </button>
       </section>
 
       <section className="game-layout">
@@ -599,6 +741,12 @@ export default function App() {
           <button className="icon-button board-reset" type="button" onClick={restart} aria-label="Restart level" title="Restart level">
             <RotateCcw size={22} />
           </button>
+          {shuffleFeedback && (
+            <div className="shuffle-callout" key={shuffleFeedback.key} aria-live="polite">
+              <strong>{shuffleFeedback.title}</strong>
+              <span>{shuffleFeedback.message}</span>
+            </div>
+          )}
           <div className="board" style={{ '--board-size': levelConfig.width }}>
             {game.board.map((row, rowIndex) =>
               row.map((cell, colIndex) => {
@@ -665,7 +813,7 @@ export default function App() {
                     }}
                     type="button"
                     onClick={() => handleTileClick(rowIndex, colIndex)}
-                    disabled={isEntityTile}
+                    disabled={isEntityTile || busy || game.status !== 'playing'}
                     style={{ '--tile-color': meta.color }}
                     aria-label={`${meta.label} ${isEntityTile ? 'at' : 'tile at'} row ${rowIndex + 1}, column ${colIndex + 1}${
                       terrain?.type === 'mud' ? ', on mud' : ''
@@ -888,6 +1036,40 @@ function getInitialSpawnedEntityCount(levelConfig) {
   return (levelConfig.gravityEntities ?? []).reduce((total, entity) => total + (entity.count ?? 0), 0);
 }
 
+function getProgressedEntityKeys(previousBoard, nextBoard, entityType) {
+  const previousEntities = getEntityPositions(previousBoard, entityType);
+  const nextEntities = new Map(getEntityPositions(nextBoard, entityType).map((cell) => [cell.key, cell]));
+  const progressed = new Set();
+
+  for (const previous of previousEntities) {
+    const next = nextEntities.get(previous.key);
+
+    if (!next || next.row > previous.row) {
+      progressed.add(previous.key);
+    }
+  }
+
+  return progressed;
+}
+
+function getNextStalledEntityMoves({ entities, progressedEntityKeys, previousStalledMoves = {}, levelConfig }) {
+  const nextStalledMoves = {};
+
+  for (const entity of entities) {
+    if (!isAssistedShuffleZoneCell(entity, levelConfig) || progressedEntityKeys.has(entity.key)) {
+      continue;
+    }
+
+    nextStalledMoves[entity.key] = Math.min(3, (previousStalledMoves[entity.key] ?? 0) + 1);
+  }
+
+  return nextStalledMoves;
+}
+
+function isAssistedShuffleZoneCell(cell, levelConfig) {
+  return cell.row >= levelConfig.height - 3 && cell.row < levelConfig.height;
+}
+
 function getTileMeta(tile, tileLookup, levelConfig) {
   if (tile?.entity && levelConfig.objective?.entityType === tile.entity) {
     return levelConfig.objective.asset;
@@ -925,8 +1107,16 @@ function getMatchPower(matches) {
 }
 
 function getPrimaryReward({ cascadeIndex, matchPower, objectiveCount, isTreatGoal, isMudGoal, completesObjective }) {
+  if (completesObjective && objectiveCount > 0) {
+    return {
+      sound: 'goal',
+      feedback: getObjectiveFeedback({ objectiveCount, isTreatGoal, isMudGoal }),
+      suppressFall: true,
+    };
+  }
+
   if (completesObjective) {
-    return { sound: null, feedback: null, suppressFall: true };
+    return { sound: getMatchSound(matchPower), feedback: getMatchFeedback(matchPower), suppressFall: true };
   }
 
   if (cascadeIndex > 0) {

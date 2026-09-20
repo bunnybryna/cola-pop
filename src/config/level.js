@@ -85,7 +85,7 @@ const SHARED_TIMING = {
 };
 
 // Set to null for normal progression. Set to a level number to make earlier goals quick for testing.
-const TEST_FAST_FORWARD_TO_LEVEL = null;
+const TEST_FAST_FORWARD_TO_LEVEL = 4;
 const TEST_PREVIOUS_LEVEL_TARGET = 1;
 
 const BASE_LEVELS = [
@@ -102,9 +102,9 @@ const BASE_LEVELS = [
   },
   story: {
     headline: 'The park is in bloom! 🌸',
-    prompt: 'Match the three flower-colored Colas and collect',
-    favoriteLead: 'Cola has favorites!',
-    favoriteDetail: 'Match any color you like, but only these three count.',
+    prompt: "Match Cola's favorite colors and collect",
+    favoriteLead: 'Only the three colors shown below count!',
+    favoriteDetail: '',
   },
   completionImage: {
     image: '/assets/level1complete.png',
@@ -123,7 +123,7 @@ const BASE_LEVELS = [
     moveLimit: 20,
     objective: {
       treatType: 'bone',
-      treatCount: 6,
+      treatCount: 8,
     },
     story: {
       headline: 'Cola is hungry! 🦴',
@@ -144,10 +144,21 @@ const BASE_LEVELS = [
         id: 'bone',
         label: 'Bone Treat',
         image: '/assets/tiles/bone.png',
-        count: 6,
+        count: 8,
         placement: {
-          borderPadding: 2,
-          minDistanceRatio: 0.3,
+          borderPadding: 0,
+          layoutAttempts: 80,
+          topRowCount: 1,
+          topRow: 0,
+          topRowColumns: [1, 2, 3, 4, 5, 6],
+          maxAdditionalBorderCount: 1,
+          forbiddenCells: [
+            { row: 7, col: 0 },
+            { row: 7, col: 7 },
+          ],
+          minImmediatelyCollectible: 1,
+          maxImmediateCollection: 3,
+          minDistanceRatio: 0.2,
           distanceBasis: 'spawnArea',
           distanceMetric: 'manhattan',
         },
@@ -165,7 +176,7 @@ const BASE_LEVELS = [
     moveLimit: 20,
     objective: {
       terrainType: 'mud',
-      targetCount: 10,
+      targetCount: 8,
     },
     story: {
       headline: 'Uh-oh... Cola found a muddy puddle!',
@@ -186,7 +197,7 @@ const BASE_LEVELS = [
         id: 'mud',
         label: 'Muddy Spot',
         identityImage: '/assets/tiles/muddycola.png',
-        count: 10,
+        count: 8,
         placement: {
           strategy: 'controlledRandom',
           layoutAttempts: 60,
@@ -223,11 +234,12 @@ const BASE_LEVELS = [
     goalType: 'dropEntities',
     width: 8,
     height: 8,
-    moveLimit: 24,
+    moveLimit: 20,
     objective: {
       entityType: 'fetch_ball',
       targetCount: 2,
       spawnAfterCollected: 1,
+      spawnAfterMovesUsed: 5,
       asset: {
         id: 'fetch_ball',
         label: 'Play On! Ball',
@@ -264,9 +276,9 @@ const BASE_LEVELS = [
           minRow: 0,
           maxRow: 0,
           preferredRows: [0],
-          spawnMinRow: 2,
-          spawnMaxRow: 3,
-          spawnPreferredRows: [2, 3],
+          spawnMinRow: 1,
+          spawnMaxRow: 1,
+          spawnPreferredRows: [1],
         },
       },
     ],

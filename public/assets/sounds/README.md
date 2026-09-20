@@ -11,6 +11,7 @@ Local mapping:
 - `pop.ogg`: `pluck_001.ogg`
 - `fall.ogg`: `drop_001.ogg`
 - `special.ogg`: `confirmation_001.ogg`
+- `paw-shuffle`: uses `special.ogg` for assisted Level 4 reshuffle
 - `goal.ogg`: `confirmation_002.ogg`
 - `invalid.ogg`: `error_001.ogg`
 - `victory.ogg`: `bong_001.ogg`, legacy fallback
@@ -30,4 +31,5 @@ Gameplay events also route through these sound IDs:
 - `unbelievable`: cascade x4+; displays `LEGENDARY!`
 - `bark-happy`: victory only
 - `wah-wah-sad`: level failed
+- `paw-shuffle`: assisted Level 4 reshuffle
 - muddy spot cleaned: uses objective progress sound (`goal`)

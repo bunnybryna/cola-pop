@@ -13,6 +13,7 @@ export function makeInitialBoard(config, tileTypes) {
     if (
       findMatches(board, config).cells.length === 0 &&
       hasPossibleMove(board, config) &&
+      isWithinAllObjectPlacementGoals(board, config) &&
       isWithinAllTerrainPlacementGoals(board, config) &&
       isFairInitialBoard(board, config)
     ) {
@@ -275,6 +276,10 @@ export function countEntities(board, entityType) {
   return count;
 }
 
+export function getEntityPositions(board, entityType) {
+  return getEntityCells(board, entityType);
+}
+
 export function markTileEntities(board, cells, state, extra = {}) {
   const marked = cloneBoard(board);
 
@@ -445,28 +450,42 @@ export function reshuffleBoard(board, config, tileTypes) {
   return shuffled;
 }
 
-export function shouldImproveEntityNearBottom(board, config, entityType) {
-  const entityCells = getEntityCells(board, entityType);
-
-  return entityCells.some(
-    (cell) => cell.row >= config.height - 3 && !hasUsefulMoveForEntityNearBottom(board, config, cell),
+export function hasUsefulMoveForEntityProgress(board, config, entityType, targetEntityKey = null) {
+  return getEntityCells(board, entityType).some(
+    (entityCell) =>
+      (!targetEntityKey || entityCell.key === targetEntityKey) &&
+      isEntityInProgressZone(entityCell, config) &&
+      hasUsefulMoveForEntity(board, config, entityCell),
   );
 }
 
-export function reshuffleBoardForEntityFairness(board, config, tileTypes, entityType) {
-  let fallback = reshuffleBoard(board, config, tileTypes);
+export function reshuffleTilesNearEntity(board, config, entityType, options = {}) {
+  const maxAttempts = options.maxAttempts ?? 60;
+  const rowRadius = options.rowRadius ?? 2;
+  const colRadius = options.colRadius ?? 2;
+  const targetEntityKey = options.targetEntityKey ?? null;
+  const candidates = getEntityCells(board, entityType)
+    .filter(
+      (entityCell) =>
+        (!targetEntityKey || entityCell.key === targetEntityKey) && isEntityInProgressZone(entityCell, config),
+    )
+    .sort((a, b) => b.row - a.row);
 
-  for (let attempt = 0; attempt < 20; attempt += 1) {
-    const candidate = reshuffleBoard(board, config, tileTypes);
+  for (const entityCell of candidates) {
+    const regionCells = getEntityShuffleRegionCells(board, config, entityCell, rowRadius, colRadius);
 
-    if (!shouldImproveEntityNearBottom(candidate, config, entityType)) {
-      return candidate;
+    if (regionCells.length < 5) {
+      continue;
     }
 
-    fallback = fallback ?? candidate;
+    const shuffled = tryShuffleRegionForEntityProgress(board, config, entityType, regionCells, maxAttempts, entityCell.key);
+
+    if (shuffled) {
+      return shuffled;
+    }
   }
 
-  return fallback ?? board;
+  return null;
 }
 
 export function getCollection(matches, board) {
@@ -500,6 +519,27 @@ function placeBoardObjects(board, config) {
     return board;
   }
 
+  const attempts = Math.max(1, Math.max(...objects.map((objectConfig) => objectConfig.placement?.layoutAttempts ?? 1)));
+  let fallback = null;
+
+  for (let attempt = 0; attempt < attempts; attempt += 1) {
+    const placed = placeBoardObjectLayout(board, config, objects);
+
+    if (!placed) {
+      continue;
+    }
+
+    fallback = fallback ?? placed;
+
+    if (isWithinAllObjectPlacementGoals(placed, config)) {
+      return placed;
+    }
+  }
+
+  return fallback;
+}
+
+function placeBoardObjectLayout(board, config, objects) {
   const next = cloneBoard(board);
   const occupied = new Set();
   const placedCells = [];
@@ -507,11 +547,35 @@ function placeBoardObjects(board, config) {
   for (const objectConfig of objects) {
     let candidates = getObjectPlacementCandidates(config, objectConfig);
     let placedForObject = 0;
+    const requiredTopRowCount = objectConfig.placement?.topRowCount ?? 0;
+
+    for (let index = 0; index < requiredTopRowCount && candidates.length > 0; index += 1) {
+      const topRowCandidates = candidates.filter(
+        (cell) =>
+          isObjectTopRowCandidate(cell, objectConfig) &&
+          !occupied.has(makeCellKey(cell)) &&
+          isFarEnoughFromPlacedObjects(cell, placedCells, config, objectConfig),
+      );
+
+      if (topRowCandidates.length === 0) {
+        break;
+      }
+
+      const placedCell = topRowCandidates[Math.floor(Math.random() * topRowCandidates.length)];
+      placeObjectCell(next, placedCell, objectConfig, occupied, placedCells);
+      candidates = candidates.filter((cell) => makeCellKey(cell) !== makeCellKey(placedCell));
+      placedForObject += 1;
+    }
 
     for (let index = 0; index < objectConfig.count && candidates.length > 0; index += 1) {
+      if (placedForObject >= objectConfig.count) {
+        break;
+      }
+
       const validCandidates = candidates.filter(
         (cell) =>
           !occupied.has(makeCellKey(cell)) &&
+          !isObjectTopRowCandidate(cell, objectConfig) &&
           isFarEnoughFromPlacedObjects(cell, placedCells, config, objectConfig),
       );
 
@@ -521,16 +585,8 @@ function placeBoardObjects(board, config) {
 
       candidates = validCandidates;
       const candidateIndex = Math.floor(Math.random() * candidates.length);
-      const { row, col } = candidates.splice(candidateIndex, 1)[0];
-      const placedCell = { row, col };
-      occupied.add(makeCellKey(placedCell));
-      placedCells.push(placedCell);
-
-      next[row][col] = createCell(null, {
-        key: crypto.randomUUID(),
-        type: objectConfig.id,
-        state: 'active',
-      });
+      const placedCell = candidates.splice(candidateIndex, 1)[0];
+      placeObjectCell(next, placedCell, objectConfig, occupied, placedCells);
       placedForObject += 1;
     }
 
@@ -540,6 +596,18 @@ function placeBoardObjects(board, config) {
   }
 
   return next;
+}
+
+function placeObjectCell(board, cell, objectConfig, occupied, placedCells) {
+  const placedCell = { row: cell.row, col: cell.col };
+  occupied.add(makeCellKey(placedCell));
+  placedCells.push(placedCell);
+
+  board[cell.row][cell.col] = createCell(null, {
+    key: crypto.randomUUID(),
+    type: objectConfig.id,
+    state: 'active',
+  });
 }
 
 function placeGravityEntities(board, config) {
@@ -861,12 +929,38 @@ function getObjectPlacementCandidates(config, objectConfig) {
 
 function isObjectPlacementCell(cell, config, objectConfig) {
   const borderPadding = objectConfig.placement?.borderPadding ?? 0;
-
-  return (
+  const placement = objectConfig.placement ?? {};
+  const topRow = placement.topRow ?? 0;
+  const isInsidePaddedArea =
     cell.row >= borderPadding &&
     cell.row <= config.height - borderPadding - 1 &&
     cell.col >= borderPadding &&
-    cell.col <= config.width - borderPadding - 1
+    cell.col <= config.width - borderPadding - 1;
+
+  if ((placement.topRowCount ?? 0) > 0 && cell.row === topRow && !isObjectTopRowCandidate(cell, objectConfig)) {
+    return false;
+  }
+
+  return (isInsidePaddedArea || isObjectTopRowCandidate(cell, objectConfig)) && !isForbiddenObjectCell(cell, objectConfig);
+}
+
+function isObjectTopRowCandidate(cell, objectConfig) {
+  const placement = objectConfig.placement ?? {};
+  const topRowCount = placement.topRowCount ?? 0;
+
+  if (topRowCount <= 0) {
+    return false;
+  }
+
+  const topRow = placement.topRow ?? 0;
+  const allowedColumns = placement.topRowColumns;
+
+  return cell.row === topRow && (!allowedColumns || allowedColumns.includes(cell.col));
+}
+
+function isForbiddenObjectCell(cell, objectConfig) {
+  return (objectConfig.placement?.forbiddenCells ?? []).some(
+    (forbidden) => forbidden.row === cell.row && forbidden.col === cell.col,
   );
 }
 
@@ -1122,6 +1216,37 @@ function isWithinAllTerrainPlacementGoals(board, config) {
   return (config.terrain ?? []).every((terrainConfig) => isWithinTerrainPlacementGoals(board, config, terrainConfig));
 }
 
+function isWithinAllObjectPlacementGoals(board, config) {
+  return (config.boardObjects ?? []).every((objectConfig) => isWithinObjectPlacementGoals(board, config, objectConfig));
+}
+
+function isWithinObjectPlacementGoals(board, config, objectConfig) {
+  const cells = getObjectCells(board, objectConfig.id);
+  const placement = objectConfig.placement ?? {};
+  const topRow = placement.topRow ?? 0;
+  const topRowCount = cells.filter((cell) => cell.row === topRow).length;
+  const requiredTopRowCount = placement.topRowCount;
+  const maxAdditionalBorderCount = placement.maxAdditionalBorderCount ?? Infinity;
+  const additionalBorderCount = Math.max(0, countBorderObjectCells(cells, config) - topRowCount);
+  const requiredCollectible = placement.minImmediatelyCollectible ?? 0;
+  const maxImmediateCollection = placement.maxImmediateCollection ?? Infinity;
+
+  return (
+    cells.length === objectConfig.count &&
+    cells.every((cell) => !isForbiddenObjectCell(cell, objectConfig)) &&
+    (requiredTopRowCount === undefined || topRowCount === requiredTopRowCount) &&
+    additionalBorderCount <= maxAdditionalBorderCount &&
+    countImmediatelyCollectibleObjects(board, config, objectConfig.id) >= requiredCollectible &&
+    getMaxImmediateObjectCollection(board, config, objectConfig.id) <= maxImmediateCollection
+  );
+}
+
+function countBorderObjectCells(cells, config) {
+  return cells.filter(
+    (cell) => cell.row === 0 || cell.row === config.height - 1 || cell.col === 0 || cell.col === config.width - 1,
+  ).length;
+}
+
 function isWithinTerrainPlacementGoals(board, config, terrainConfig) {
   const cells = getTerrainCells(board, terrainConfig.id);
   const rowCounts = getTerrainRowCounts(board, terrainConfig.id);
@@ -1148,15 +1273,77 @@ function isWithinTerrainPlacementGoals(board, config, terrainConfig) {
 }
 
 function isFairInitialBoard(board, config) {
-  return (config.terrain ?? []).every((terrainConfig) => {
-    const requiredCleanable = terrainConfig.placement?.minImmediatelyCleanable ?? 0;
+  return (
+    (config.terrain ?? []).every((terrainConfig) => {
+      const requiredCleanable = terrainConfig.placement?.minImmediatelyCleanable ?? 0;
 
-    if (requiredCleanable === 0) {
-      return true;
+      if (requiredCleanable === 0) {
+        return true;
+      }
+
+      return countImmediatelyCleanableTerrainCells(board, config, terrainConfig.id) >= requiredCleanable;
+    }) &&
+    (config.boardObjects ?? []).every((objectConfig) => {
+      const requiredCollectible = objectConfig.placement?.minImmediatelyCollectible ?? 0;
+
+      if (requiredCollectible === 0) {
+        return true;
+      }
+
+      return countImmediatelyCollectibleObjects(board, config, objectConfig.id) >= requiredCollectible;
+    })
+  );
+}
+
+function countImmediatelyCollectibleObjects(board, config, objectType) {
+  const collectible = new Set();
+
+  for (const collectableCells of getImmediateObjectCollectionOptions(board, config, objectType)) {
+    for (const cell of collectableCells) {
+      collectible.add(makeCellKey(cell));
     }
+  }
 
-    return countImmediatelyCleanableTerrainCells(board, config, terrainConfig.id) >= requiredCleanable;
-  });
+  return collectible.size;
+}
+
+function getMaxImmediateObjectCollection(board, config, objectType) {
+  return Math.max(0, ...getImmediateObjectCollectionOptions(board, config, objectType).map((cells) => cells.length));
+}
+
+function getImmediateObjectCollectionOptions(board, config, objectType) {
+  const options = [];
+
+  for (let row = 0; row < config.height; row += 1) {
+    for (let col = 0; col < config.width; col += 1) {
+      const current = { row, col };
+      const candidates = [
+        { row, col: col + 1 },
+        { row: row + 1, col },
+      ];
+
+      for (const target of candidates) {
+        if (target.row >= config.height || target.col >= config.width || !canSwapCells(board, current, target)) {
+          continue;
+        }
+
+        const swapped = swapTiles(board, current, target);
+        const matches = findMatches(swapped, config);
+
+        if (matches.cells.length === 0) {
+          continue;
+        }
+
+        const collected = findAdjacentObjects(matches, swapped, config, objectType);
+
+        if (collected.length > 0) {
+          options.push(collected);
+        }
+      }
+    }
+  }
+
+  return options;
 }
 
 function countImmediatelyCleanableTerrainCells(board, config, terrainType) {
@@ -1221,12 +1408,12 @@ function getTerrainCells(board, terrainType) {
   return cells;
 }
 
-function getEntityCells(board, entityType) {
+function getObjectCells(board, objectType) {
   const cells = [];
 
   for (let row = 0; row < board.length; row += 1) {
     for (let col = 0; col < board[row].length; col += 1) {
-      if (getCellTile(board[row][col])?.entity === entityType) {
+      if (board[row][col].object?.type === objectType) {
         cells.push({ row, col });
       }
     }
@@ -1235,13 +1422,76 @@ function getEntityCells(board, entityType) {
   return cells;
 }
 
-function hasUsefulMoveForEntityNearBottom(board, config, entityCell) {
-  const bottomTwoStart = config.height - 2;
-  const minRelevantRow = Math.max(entityCell.row, bottomTwoStart);
-  const minCol = Math.max(0, entityCell.col - 1);
-  const maxCol = Math.min(config.width - 1, entityCell.col + 1);
+function getEntityShuffleRegionCells(board, config, entityCell, rowRadius, colRadius) {
+  const cells = [];
+  const minRow = Math.max(0, entityCell.row - rowRadius);
+  const maxRow = config.height - 1;
+  const minCol = Math.max(0, entityCell.col - colRadius);
+  const maxCol = Math.min(config.width - 1, entityCell.col + colRadius);
 
-  for (let row = Math.max(0, entityCell.row - 1); row < config.height; row += 1) {
+  for (let row = minRow; row <= maxRow; row += 1) {
+    for (let col = minCol; col <= maxCol; col += 1) {
+      const tile = getCellTile(board[row]?.[col]);
+
+      if (isSwappableTile(tile)) {
+        cells.push({ row, col });
+      }
+    }
+  }
+
+  return cells;
+}
+
+function tryShuffleRegionForEntityProgress(board, config, entityType, regionCells, maxAttempts, targetEntityKey) {
+  const sourceTiles = regionCells.map((cell) => ({ ...getCellTile(board[cell.row][cell.col]) }));
+
+  for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
+    const shuffledTiles = shuffleTiles(sourceTiles).map((tile) => ({
+      ...tile,
+      key: crypto.randomUUID(),
+      state: 'paw-shuffle',
+    }));
+    const candidate = cloneBoard(board);
+
+    for (let index = 0; index < regionCells.length; index += 1) {
+      const cell = regionCells[index];
+      candidate[cell.row][cell.col].tile = shuffledTiles[index];
+    }
+
+    if (
+      findMatches(candidate, config).cells.length === 0 &&
+      hasPossibleMove(candidate, config) &&
+      hasUsefulMoveForEntityProgress(candidate, config, entityType, targetEntityKey)
+    ) {
+      return {
+        board: candidate,
+        cells: regionCells,
+      };
+    }
+  }
+
+  return null;
+}
+
+function shuffleTiles(tiles) {
+  const shuffled = tiles.map((tile) => ({ ...tile }));
+
+  for (let index = shuffled.length - 1; index > 0; index -= 1) {
+    const swapIndex = Math.floor(Math.random() * (index + 1));
+    const current = shuffled[index];
+    shuffled[index] = shuffled[swapIndex];
+    shuffled[swapIndex] = current;
+  }
+
+  return shuffled;
+}
+
+function isEntityInProgressZone(entityCell, config) {
+  return entityCell.row >= config.height - 3 && entityCell.row < config.height;
+}
+
+function hasUsefulMoveForEntity(board, config, entityCell) {
+  for (let row = 0; row < config.height; row += 1) {
     for (let col = 0; col < config.width; col += 1) {
       const current = { row, col };
       const candidates = [
@@ -1254,20 +1504,9 @@ function hasUsefulMoveForEntityNearBottom(board, config, entityCell) {
           continue;
         }
 
-        const touchesBottomTwo = current.row >= bottomTwoStart || target.row >= bottomTwoStart;
-        const nearEntityColumn =
-          (current.col >= minCol && current.col <= maxCol) || (target.col >= minCol && target.col <= maxCol);
-
-        if (!touchesBottomTwo && !nearEntityColumn) {
-          continue;
-        }
-
         const matches = findMatches(swapTiles(board, current, target), config);
-        const clearsRelevantPath = matches.cells.some(
-          (cell) => cell.row >= minRelevantRow && cell.col >= minCol && cell.col <= maxCol,
-        );
 
-        if ((touchesBottomTwo || nearEntityColumn) && clearsRelevantPath) {
+        if (matches.cells.some((cell) => isUsefulEntityProgressCell(cell, config, entityCell))) {
           return true;
         }
       }
@@ -1275,6 +1514,26 @@ function hasUsefulMoveForEntityNearBottom(board, config, entityCell) {
   }
 
   return false;
+}
+
+function isUsefulEntityProgressCell(cell, config, entityCell) {
+  return cell.row > entityCell.row && cell.col === entityCell.col && cell.row < config.height;
+}
+
+function getEntityCells(board, entityType) {
+  const cells = [];
+
+  for (let row = 0; row < board.length; row += 1) {
+    for (let col = 0; col < board[row].length; col += 1) {
+      const tile = getCellTile(board[row][col]);
+
+      if (tile?.entity === entityType) {
+        cells.push({ row, col, key: tile.key });
+      }
+    }
+  }
+
+  return cells;
 }
 
 function getTerrainRowCounts(board, terrainType) {
