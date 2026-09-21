@@ -69,6 +69,10 @@ export default function App() {
   const tileRefs = useRef(new Map());
   const goalTargetRef = useRef(null);
   const mascotTimerRef = useRef(null);
+  const matchFeedbackTimerRef = useRef(null);
+  const shuffleFeedbackTimerRef = useRef(null);
+  const movesCalloutTimerRef = useRef(null);
+  const collectFlyersTimerRef = useRef(null);
   const inputLockedRef = useRef(false);
 
   const tileLookup = useMemo(() => new Map(TILE_TYPES.map((tile) => [tile.id, tile])), []);
@@ -113,6 +117,10 @@ export default function App() {
       return;
     }
 
+    if (await maybeApplyPreMoveEmergencyShuffle()) {
+      return;
+    }
+
     const target = { row, col };
 
     if (!canSwapCells(game.board, target, target)) {
@@ -137,6 +145,34 @@ export default function App() {
     await attemptSwap(selected, target);
   }
 
+  async function maybeApplyPreMoveEmergencyShuffle() {
+    if (!isDropGoal || game.moves > 2 || game.assistedShuffleUsed) {
+      return false;
+    }
+
+    inputLockedRef.current = true;
+    setBusy(true);
+    setSelected(null);
+
+    const resolved = await maybeApplyAssistedShuffle(
+      {
+        board: game.board,
+        score: game.score,
+        collected: game.collected,
+        spawnedEntities: game.spawnedEntities,
+        stalledEntityMoves: game.stalledEntityMoves,
+        assistedShuffleUsed: game.assistedShuffleUsed,
+      },
+      game.moves,
+      { forceEmergency: true, previousBoard: game.board },
+    );
+    const didShuffle = resolved.assistedShuffleUsed && !game.assistedShuffleUsed;
+
+    inputLockedRef.current = false;
+    setBusy(false);
+    return didShuffle;
+  }
+
   async function attemptSwap(from, to) {
     if (inputLockedRef.current) {
       return;
@@ -152,9 +188,6 @@ export default function App() {
 
     const matches = findMatches(swapped, levelConfig);
     const nextMoves = game.moves - 1;
-    if (nextMoves === 3) {
-      setMovesCallout({ key: Date.now(), text: '3 MOVES LEFT!' });
-    }
 
     if (matches.cells.length === 0) {
       playSound('invalid');
@@ -173,6 +206,10 @@ export default function App() {
       return;
     }
 
+    if (nextMoves === 3) {
+      showMovesCallout('3 MOVES LEFT!');
+    }
+
     let resolved = await resolveMatches(swapped, {
       moves: nextMoves,
       score: game.score,
@@ -186,6 +223,7 @@ export default function App() {
       playSound('victory');
       window.clearTimeout(mascotTimerRef.current);
       setMascotReaction(null);
+      clearTransientFeedback();
       setVictoryCelebration(true);
       setGame((current) => ({
         ...current,
@@ -296,7 +334,7 @@ export default function App() {
       }
 
       if (reward.feedback) {
-        setMatchFeedback({ ...reward.feedback, key: `${Date.now()}-${cascadeIndex}` });
+        showMatchFeedback({ ...reward.feedback, key: `${Date.now()}-${cascadeIndex}` });
       }
 
       const markedBoard = markCells(
@@ -356,7 +394,7 @@ export default function App() {
 
         if (entityCells.length > 0) {
           playSound('goal');
-          setMatchFeedback({ text: 'FETCH!', tone: 'nice', key: `${Date.now()}-${cascadeIndex}-fetch` });
+          showMatchFeedback({ text: 'FETCH!', tone: 'nice', key: `${Date.now()}-${cascadeIndex}-fetch` });
           reactMascot(collected + entityCells.length >= objectiveTarget ? 'victory' : 'goodMatch', 950);
 
           const collectingBoard = markTileEntities(board, entityCells, 'collecting');
@@ -450,7 +488,7 @@ export default function App() {
     };
   }
 
-  async function maybeApplyAssistedShuffle(resolvedState, nextMoves) {
+  async function maybeApplyAssistedShuffle(resolvedState, nextMoves, options = {}) {
     if (!isDropGoal || game.assistedShuffleUsed) {
       return {
         ...resolvedState,
@@ -460,7 +498,8 @@ export default function App() {
     }
 
     const entityType = levelConfig.objective.entityType;
-    const progressedEntityKeys = getProgressedEntityKeys(game.board, resolvedState.board, entityType);
+    const previousBoard = options.previousBoard ?? game.board;
+    const progressedEntityKeys = getProgressedEntityKeys(previousBoard, resolvedState.board, entityType);
     const currentEntities = getEntityPositions(resolvedState.board, entityType);
     const stalledEntityMoves = getNextStalledEntityMoves({
       entities: currentEntities,
@@ -468,7 +507,7 @@ export default function App() {
       previousStalledMoves: game.stalledEntityMoves,
       levelConfig,
     });
-    const shouldEmergencyCheck = nextMoves <= 2;
+    const shouldEmergencyCheck = options.forceEmergency || nextMoves <= 2;
     const targetEntity = currentEntities
       .filter(
         (cell) =>
@@ -498,13 +537,12 @@ export default function App() {
       };
     }
 
-    setShuffleFeedback({
+    showShuffleFeedback({
       key: Date.now(),
       title: 'PAW-SHUFFLE! 🐾',
       message: 'Cola mixed things up! Try a new match.',
     });
     playSound('paw-shuffle');
-    window.setTimeout(() => setShuffleFeedback(null), 3000);
     setGame((current) => ({
       ...current,
       ...resolvedState,
@@ -520,6 +558,35 @@ export default function App() {
       stalledEntityMoves: {},
       assistedShuffleUsed: true,
     };
+  }
+
+  function showMatchFeedback(feedback, duration = 1650) {
+    window.clearTimeout(matchFeedbackTimerRef.current);
+    setMatchFeedback(feedback);
+    matchFeedbackTimerRef.current = window.setTimeout(() => setMatchFeedback(null), duration);
+  }
+
+  function showMovesCallout(text) {
+    window.clearTimeout(movesCalloutTimerRef.current);
+    setMovesCallout({ key: Date.now(), text });
+    movesCalloutTimerRef.current = window.setTimeout(() => setMovesCallout(null), 1850);
+  }
+
+  function showShuffleFeedback(feedback) {
+    window.clearTimeout(shuffleFeedbackTimerRef.current);
+    setShuffleFeedback(feedback);
+    shuffleFeedbackTimerRef.current = window.setTimeout(() => setShuffleFeedback(null), 3000);
+  }
+
+  function clearTransientFeedback() {
+    window.clearTimeout(matchFeedbackTimerRef.current);
+    window.clearTimeout(shuffleFeedbackTimerRef.current);
+    window.clearTimeout(movesCalloutTimerRef.current);
+    window.clearTimeout(collectFlyersTimerRef.current);
+    setMatchFeedback(null);
+    setShuffleFeedback(null);
+    setMovesCallout(null);
+    setCollectFlyers([]);
   }
 
   async function playVictoryBarks(config) {
@@ -559,10 +626,8 @@ export default function App() {
     setSelected(null);
     setBusy(false);
     setNotice('');
-    setMatchFeedback(null);
-    setCollectFlyers([]);
+    clearTransientFeedback();
     setProgressPulseKey(0);
-    setMovesCallout(null);
     setMascotReaction(null);
     setVictoryCelebration(false);
     window.clearTimeout(mascotTimerRef.current);
@@ -615,8 +680,9 @@ export default function App() {
       })
       .filter(Boolean);
 
+    window.clearTimeout(collectFlyersTimerRef.current);
     setCollectFlyers(flyers);
-    window.setTimeout(() => setCollectFlyers([]), levelConfig.timing.collectFly + 180);
+    collectFlyersTimerRef.current = window.setTimeout(() => setCollectFlyers([]), levelConfig.timing.collectFly + 180);
   }
 
   return (

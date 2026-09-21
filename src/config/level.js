@@ -234,7 +234,7 @@ const BASE_LEVELS = [
     goalType: 'dropEntities',
     width: 8,
     height: 8,
-    moveLimit: 20,
+    moveLimit: 30,
     objective: {
       entityType: 'fetch_ball',
       targetCount: 2,
