@@ -20,7 +20,7 @@ Local mapping:
 - `bark-happy.ogg`: `Dog Bark.wav` by 8bitmyketison, Freesound, Creative Commons 0, https://freesound.org/people/8bitmyketison/sounds/699822/
 - `epic.mp3`: `Man Says Epic` by floraphonic, Pixabay Content License, https://pixabay.com/sound-effects/people-man-says-epic-184039/
 - `amazing.mp3`: `Man Says Amazing` by floraphonic, Pixabay Content License, https://pixabay.com/sound-effects/people-man-says-amazing-184036/
-- `unbelievable.mp3`: `Positive Tone Man Says Legendary` by floraphonic, Pixabay Content License, https://pixabay.com/sound-effects/people-positive-tone-man-says-legendary-214607/
+- `legendary.mp3`: `Positive Tone Man Says Legendary` by floraphonic, Pixabay Content License, https://pixabay.com/sound-effects/people-positive-tone-man-says-legendary-214607/
 - `mud-clean.mp3`: `Cartoon Wet Splat` by Universfield, Pixabay Content License, https://pixabay.com/sound-effects/film-special-effects-cartoon-wet-splat-352447/, unused
 - `windowsqueek.mp3`: unused window squeak test sound
 
@@ -28,7 +28,7 @@ Gameplay events also route through these sound IDs:
 
 - `epic`: cascade x2
 - `amazing`: cascade x3
-- `unbelievable`: cascade x4+; displays `LEGENDARY!`
+- `legendary`: cascade x4+; displays `LEGENDARY!`
 - `bark-happy`: victory only
 - `wah-wah-sad`: level failed
 - `paw-shuffle`: assisted Level 4 reshuffle

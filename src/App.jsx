@@ -1,32 +1,37 @@
 import { PawPrint, RotateCcw } from 'lucide-react';
-import { useMemo, useRef, useState } from 'react';
-import { playSound } from './audio/sounds.js';
+import { useEffect, useMemo, useRef, useState } from 'react';
+import { playPrimarySound, playSound, stopPrimarySounds } from './audio/sounds.js';
 import { LEVELS, MASCOT_STATES, TILE_TYPES } from './config/level.js';
+import { getPrimaryReward } from './game/rewards.js';
 import {
   applyGravityAndRefill,
   areAdjacent,
   canSwapCells,
   clearCells,
   clearObjects,
-  clearTileEntities,
   clearTerrain,
   countEntities,
   findAdjacentObjects,
-  findBottomEntities,
   findMatchedTerrain,
   findMatches,
   getEntityPositions,
   hasUsefulMoveForEntityProgress,
   getCollection,
+  getBottomEntityCollectionStep,
+  getNextEntityStallCounts,
+  getTerrainPositions,
+  hasUsefulMoveForTerrainClean,
   hasPossibleMove,
+  isEntityInProgressZone,
   makeInitialBoard,
   markCells,
   markObjects,
   markTileEntities,
   markTerrain,
   resetTileStates,
+  repairStuckEntityProgress,
+  repairStuckTerrainClean,
   reshuffleBoard,
-  reshuffleTilesNearEntity,
   scoreMatches,
   spawnGravityEntity,
   swapTiles,
@@ -47,6 +52,8 @@ function createGame(levelConfig) {
     spawnedEntities: getInitialSpawnedEntityCount(levelConfig),
     stalledEntityMoves: {},
     assistedShuffleUsed: false,
+    mudStallMoves: 0,
+    mudRepairUsed: false,
     status: 'playing',
     message: '',
   };
@@ -61,6 +68,7 @@ export default function App() {
   const [notice, setNotice] = useState('');
   const [matchFeedback, setMatchFeedback] = useState(null);
   const [shuffleFeedback, setShuffleFeedback] = useState(null);
+  const [ballEntranceFeedback, setBallEntranceFeedback] = useState(null);
   const [collectFlyers, setCollectFlyers] = useState([]);
   const [progressPulseKey, setProgressPulseKey] = useState(0);
   const [movesCallout, setMovesCallout] = useState(null);
@@ -71,8 +79,10 @@ export default function App() {
   const mascotTimerRef = useRef(null);
   const matchFeedbackTimerRef = useRef(null);
   const shuffleFeedbackTimerRef = useRef(null);
+  const ballEntranceTimerRef = useRef(null);
   const movesCalloutTimerRef = useRef(null);
   const collectFlyersTimerRef = useRef(null);
+  const primaryRewardTokenRef = useRef(0);
   const inputLockedRef = useRef(false);
 
   const tileLookup = useMemo(() => new Map(TILE_TYPES.map((tile) => [tile.id, tile])), []);
@@ -111,6 +121,18 @@ export default function App() {
     ) : (
       levelConfig.story.prompt
     );
+
+  useEffect(() => {
+    return () => {
+      window.clearTimeout(matchFeedbackTimerRef.current);
+      window.clearTimeout(shuffleFeedbackTimerRef.current);
+      window.clearTimeout(ballEntranceTimerRef.current);
+      window.clearTimeout(movesCalloutTimerRef.current);
+      window.clearTimeout(collectFlyersTimerRef.current);
+      window.clearTimeout(mascotTimerRef.current);
+      stopPrimarySounds();
+    };
+  }, []);
 
   async function handleTileClick(row, col) {
     if (inputLockedRef.current || busy || game.status !== 'playing') {
@@ -206,6 +228,9 @@ export default function App() {
       return;
     }
 
+    clearPrimaryRewardFeedback();
+    stopPrimarySounds();
+
     if (nextMoves === 3) {
       showMovesCallout('3 MOVES LEFT!');
     }
@@ -216,11 +241,15 @@ export default function App() {
       collected: game.collected,
       spawnedEntities: game.spawnedEntities,
     });
+    const spawnedBeforeTimedDrop = resolved.spawnedEntities;
     resolved = spawnTimedDropEntityIfNeeded(resolved, nextMoves);
+    if ((resolved.spawnedEntities ?? 0) > (spawnedBeforeTimedDrop ?? 0)) {
+      showBallEntranceFeedback();
+    }
 
     const status = getStatus(resolved.collected, nextMoves, levelConfig);
     if (status === 'won') {
-      playSound('victory');
+      playPrimarySound('victory');
       window.clearTimeout(mascotTimerRef.current);
       setMascotReaction(null);
       clearTransientFeedback();
@@ -266,6 +295,7 @@ export default function App() {
     let score = initialState.score;
     let collected = initialState.collected;
     let spawnedEntities = initialState.spawnedEntities ?? getInitialSpawnedEntityCount(levelConfig);
+    let mudCleanedThisMove = false;
     let cascadeIndex = 0;
 
     while (true) {
@@ -287,6 +317,7 @@ export default function App() {
           : isMudGoal
             ? mudCells.length
             : getTargetCollectionCount(collection, objectiveTileSet);
+      mudCleanedThisMove = mudCleanedThisMove || (isMudGoal && targetCollectionCount > 0);
       const nextCollected = collected + targetCollectionCount;
       const completesObjective = nextCollected >= objectiveTarget;
       if (completesObjective && targetCollectionCount > 0) {
@@ -308,10 +339,6 @@ export default function App() {
         isMudGoal,
         completesObjective,
       });
-
-      if (reward.sound) {
-        playSound(reward.sound);
-      }
 
       if (isTreatGoal) {
         if (targetCollectionCount > 1 || (targetCollectionCount > 0 && cascadeIndex > 0)) {
@@ -335,6 +362,10 @@ export default function App() {
 
       if (reward.feedback) {
         showMatchFeedback({ ...reward.feedback, key: `${Date.now()}-${cascadeIndex}` });
+      }
+
+      if (reward.sound) {
+        playPrimarySound(reward.sound);
       }
 
       const markedBoard = markCells(
@@ -389,12 +420,19 @@ export default function App() {
       await sleep(levelConfig.timing.fall);
 
       if (isDropGoal) {
-        const remainingNeeded = Math.max(0, objectiveTarget - collected);
-        const entityCells = findBottomEntities(board, levelConfig, levelConfig.objective.entityType).slice(0, remainingNeeded);
+        let collectionStep = getBottomEntityCollectionStep(board, levelConfig, TILE_TYPES, levelConfig.objective.entityType, {
+          targetCount: objectiveTarget,
+          collected,
+          spawnedEntities,
+        });
 
-        if (entityCells.length > 0) {
-          playSound('goal');
-          showMatchFeedback({ text: 'FETCH!', tone: 'nice', key: `${Date.now()}-${cascadeIndex}-fetch` });
+        while (collectionStep) {
+          const entityCells = collectionStep.cells;
+          const completesDropObjective = collected + entityCells.length >= objectiveTarget;
+          if (!completesDropObjective) {
+            showMatchFeedback({ text: 'FETCH!', tone: 'nice', key: `${Date.now()}-${cascadeIndex}-fetch` });
+            playPrimarySound('goal');
+          }
           reactMascot(collected + entityCells.length >= objectiveTarget ? 'victory' : 'goodMatch', 950);
 
           const collectingBoard = markTileEntities(board, entityCells, 'collecting');
@@ -403,25 +441,26 @@ export default function App() {
           launchCollectFlyers(entityCells, board, { kind: 'entity', entityMeta: objectiveEntity });
           await sleep(levelConfig.timing.collectFly);
 
-          collected = Math.min(objectiveTarget, collected + entityCells.length);
+          collected = collectionStep.collected;
           if (collected >= objectiveTarget) {
             lockTerminalObjectiveResolution();
           }
           setProgressPulseKey(Date.now());
-          board = clearTileEntities(board, entityCells);
-          board = applyGravityAndRefill(board, levelConfig, TILE_TYPES);
-
-          if (
-            collected >= (levelConfig.objective.spawnAfterCollected ?? Infinity) &&
-            spawnedEntities < objectiveTarget &&
-            countEntities(board, levelConfig.objective.entityType) < objectiveTarget - collected
-          ) {
-            board = spawnGravityEntity(board, levelConfig, levelConfig.objective.entityType);
-            spawnedEntities += 1;
+          const spawnedDuringCollection = collectionStep.spawnedEntities > spawnedEntities;
+          board = collectionStep.board;
+          spawnedEntities = collectionStep.spawnedEntities;
+          if (spawnedDuringCollection) {
+            showBallEntranceFeedback();
           }
 
           setGame((current) => ({ ...current, board, score, collected, spawnedEntities }));
           await sleep(levelConfig.timing.fall);
+
+          collectionStep = getBottomEntityCollectionStep(board, levelConfig, TILE_TYPES, levelConfig.objective.entityType, {
+            targetCount: objectiveTarget,
+            collected,
+            spawnedEntities,
+          });
         }
       }
 
@@ -439,11 +478,16 @@ export default function App() {
       setNotice('');
     }
 
+    const mudAssist = await maybeApplyMudAssistedRepair(board, collected, mudCleanedThisMove);
+    board = mudAssist.board;
+
     return {
       board: resetTileStates(board),
       score,
       collected,
       spawnedEntities,
+      mudStallMoves: mudAssist.mudStallMoves,
+      mudRepairUsed: mudAssist.mudRepairUsed,
     };
   }
 
@@ -488,6 +532,82 @@ export default function App() {
     };
   }
 
+  async function maybeApplyMudAssistedRepair(board, collected, mudCleanedThisMove) {
+    const currentMudStallMoves = game.mudStallMoves ?? 0;
+    const currentMudRepairUsed = Boolean(game.mudRepairUsed);
+
+    if (!isMudGoal) {
+      return {
+        board,
+        mudStallMoves: 0,
+        mudRepairUsed: currentMudRepairUsed,
+      };
+    }
+
+    if (mudCleanedThisMove) {
+      return {
+        board,
+        mudStallMoves: 0,
+        mudRepairUsed: currentMudRepairUsed,
+      };
+    }
+
+    const remainingMud = getTerrainPositions(board, levelConfig.objective.terrainType).length;
+
+    if (remainingMud < 1 || remainingMud > 2) {
+      return {
+        board,
+        mudStallMoves: 0,
+        mudRepairUsed: currentMudRepairUsed,
+      };
+    }
+
+    const nextMudStallMoves = Math.min(2, currentMudStallMoves + 1);
+
+    if (
+      nextMudStallMoves < 2 ||
+      currentMudRepairUsed ||
+      hasUsefulMoveForTerrainClean(board, levelConfig, levelConfig.objective.terrainType)
+    ) {
+      return {
+        board,
+        mudStallMoves: nextMudStallMoves,
+        mudRepairUsed: currentMudRepairUsed,
+      };
+    }
+
+    const repaired = repairStuckTerrainClean(board, levelConfig, levelConfig.objective.terrainType);
+
+    if (!repaired.board) {
+      console.warn(`Level 3 mud assist skipped: ${repaired.reason ?? 'unverified repair'}`);
+      return {
+        board,
+        mudStallMoves: nextMudStallMoves,
+        mudRepairUsed: false,
+      };
+    }
+
+    showShuffleFeedback({
+      key: Date.now(),
+      title: 'PAW-SHUFFLE! 🐾',
+      message: 'Cola mixed things up! Try a new match.',
+    });
+    setGame((current) => ({
+      ...current,
+      board: repaired.board,
+      collected,
+      mudStallMoves: 0,
+      mudRepairUsed: true,
+    }));
+    await sleep(620);
+
+    return {
+      board: resetTileStates(repaired.board),
+      mudStallMoves: 0,
+      mudRepairUsed: true,
+    };
+  }
+
   async function maybeApplyAssistedShuffle(resolvedState, nextMoves, options = {}) {
     if (!isDropGoal || game.assistedShuffleUsed) {
       return {
@@ -501,17 +621,17 @@ export default function App() {
     const previousBoard = options.previousBoard ?? game.board;
     const progressedEntityKeys = getProgressedEntityKeys(previousBoard, resolvedState.board, entityType);
     const currentEntities = getEntityPositions(resolvedState.board, entityType);
-    const stalledEntityMoves = getNextStalledEntityMoves({
+    const stalledEntityMoves = getNextEntityStallCounts({
       entities: currentEntities,
       progressedEntityKeys,
       previousStalledMoves: game.stalledEntityMoves,
-      levelConfig,
+      config: levelConfig,
     });
     const shouldEmergencyCheck = options.forceEmergency || nextMoves <= 2;
     const targetEntity = currentEntities
       .filter(
         (cell) =>
-          isAssistedShuffleZoneCell(cell, levelConfig) &&
+          isEntityInProgressZone(cell, levelConfig) &&
           (shouldEmergencyCheck || (stalledEntityMoves[cell.key] ?? 0) >= 3) &&
           !hasUsefulMoveForEntityProgress(resolvedState.board, levelConfig, entityType, cell.key),
       )
@@ -525,11 +645,12 @@ export default function App() {
       };
     }
 
-    const assistedShuffle = reshuffleTilesNearEntity(resolvedState.board, levelConfig, entityType, {
+    const assistedShuffle = repairStuckEntityProgress(resolvedState.board, levelConfig, entityType, {
       targetEntityKey: targetEntity.key,
     });
 
-    if (!assistedShuffle) {
+    if (!assistedShuffle.board) {
+      console.warn(`Level 4 assisted reshuffle skipped: ${assistedShuffle.reason ?? 'unverified repair'}`);
       return {
         ...resolvedState,
         stalledEntityMoves,
@@ -561,9 +682,21 @@ export default function App() {
   }
 
   function showMatchFeedback(feedback, duration = 1650) {
+    const token = primaryRewardTokenRef.current + 1;
+    primaryRewardTokenRef.current = token;
     window.clearTimeout(matchFeedbackTimerRef.current);
     setMatchFeedback(feedback);
-    matchFeedbackTimerRef.current = window.setTimeout(() => setMatchFeedback(null), duration);
+    matchFeedbackTimerRef.current = window.setTimeout(() => {
+      if (primaryRewardTokenRef.current === token) {
+        setMatchFeedback(null);
+      }
+    }, duration);
+  }
+
+  function clearPrimaryRewardFeedback() {
+    primaryRewardTokenRef.current += 1;
+    window.clearTimeout(matchFeedbackTimerRef.current);
+    setMatchFeedback(null);
   }
 
   function showMovesCallout(text) {
@@ -578,13 +711,20 @@ export default function App() {
     shuffleFeedbackTimerRef.current = window.setTimeout(() => setShuffleFeedback(null), 3000);
   }
 
+  function showBallEntranceFeedback() {
+    window.clearTimeout(ballEntranceTimerRef.current);
+    setBallEntranceFeedback({ key: Date.now(), text: 'NEW BALL! 🎾' });
+    ballEntranceTimerRef.current = window.setTimeout(() => setBallEntranceFeedback(null), 1300);
+  }
+
   function clearTransientFeedback() {
-    window.clearTimeout(matchFeedbackTimerRef.current);
+    clearPrimaryRewardFeedback();
     window.clearTimeout(shuffleFeedbackTimerRef.current);
+    window.clearTimeout(ballEntranceTimerRef.current);
     window.clearTimeout(movesCalloutTimerRef.current);
     window.clearTimeout(collectFlyersTimerRef.current);
-    setMatchFeedback(null);
     setShuffleFeedback(null);
+    setBallEntranceFeedback(null);
     setMovesCallout(null);
     setCollectFlyers([]);
   }
@@ -620,6 +760,7 @@ export default function App() {
 
   function startLevel(levelIndex) {
     const nextLevel = LEVELS[levelIndex] ?? LEVELS[0];
+    stopPrimarySounds();
     inputLockedRef.current = false;
     setActiveLevelIndex(levelIndex);
     setGame(createGame(nextLevel));
@@ -813,6 +954,11 @@ export default function App() {
               <span>{shuffleFeedback.message}</span>
             </div>
           )}
+          {ballEntranceFeedback && (
+            <div className="ball-entrance-callout" key={ballEntranceFeedback.key} aria-live="polite">
+              {ballEntranceFeedback.text}
+            </div>
+          )}
           <div className="board" style={{ '--board-size': levelConfig.width }}>
             {game.board.map((row, rowIndex) =>
               row.map((cell, colIndex) => {
@@ -998,7 +1144,7 @@ export default function App() {
         );
       })}
 
-      <div className={`completion-spark ${objectiveComplete ? 'show' : ''}`}>Goal complete</div>
+      {objectiveComplete && <div className="completion-spark show">Goal complete</div>}
     </main>
   );
 }
@@ -1118,24 +1264,6 @@ function getProgressedEntityKeys(previousBoard, nextBoard, entityType) {
   return progressed;
 }
 
-function getNextStalledEntityMoves({ entities, progressedEntityKeys, previousStalledMoves = {}, levelConfig }) {
-  const nextStalledMoves = {};
-
-  for (const entity of entities) {
-    if (!isAssistedShuffleZoneCell(entity, levelConfig) || progressedEntityKeys.has(entity.key)) {
-      continue;
-    }
-
-    nextStalledMoves[entity.key] = Math.min(3, (previousStalledMoves[entity.key] ?? 0) + 1);
-  }
-
-  return nextStalledMoves;
-}
-
-function isAssistedShuffleZoneCell(cell, levelConfig) {
-  return cell.row >= levelConfig.height - 3 && cell.row < levelConfig.height;
-}
-
 function getTileMeta(tile, tileLookup, levelConfig) {
   if (tile?.entity && levelConfig.objective?.entityType === tile.entity) {
     return levelConfig.objective.asset;
@@ -1170,110 +1298,6 @@ function pickRandomTargetTiles(tileTypes, count) {
 
 function getMatchPower(matches) {
   return Math.max(...matches.groups.map((group) => group.cells.length), 3);
-}
-
-function getPrimaryReward({ cascadeIndex, matchPower, objectiveCount, isTreatGoal, isMudGoal, completesObjective }) {
-  if (completesObjective && objectiveCount > 0) {
-    return {
-      sound: 'goal',
-      feedback: getObjectiveFeedback({ objectiveCount, isTreatGoal, isMudGoal }),
-      suppressFall: true,
-    };
-  }
-
-  if (completesObjective) {
-    return { sound: getMatchSound(matchPower), feedback: getMatchFeedback(matchPower), suppressFall: true };
-  }
-
-  if (cascadeIndex > 0) {
-    return {
-      sound: getCascadeSound(cascadeIndex),
-      feedback: getCascadeFeedback(cascadeIndex),
-      suppressFall: true,
-    };
-  }
-
-  if (objectiveCount > 0) {
-    return {
-      sound: 'goal',
-      feedback: getObjectiveFeedback({ objectiveCount, isTreatGoal, isMudGoal }),
-      suppressFall: false,
-    };
-  }
-
-  if (matchPower >= 4) {
-    return {
-      sound: 'special',
-      feedback: getMatchFeedback(matchPower),
-      suppressFall: false,
-    };
-  }
-
-  return {
-    sound: 'pop',
-    feedback: null,
-    suppressFall: false,
-  };
-}
-
-function getMatchSound(matchPower) {
-  return matchPower >= 4 ? 'special' : 'pop';
-}
-
-function getCascadeSound(cascadeIndex) {
-  if (cascadeIndex >= 3) {
-    return 'unbelievable';
-  }
-
-  if (cascadeIndex === 2) {
-    return 'amazing';
-  }
-
-  if (cascadeIndex === 1) {
-    return 'epic';
-  }
-
-  return 'epic';
-}
-
-function getCascadeFeedback(cascadeIndex) {
-  if (cascadeIndex >= 3) {
-    return { text: 'LEGENDARY!', tone: 'combo-max' };
-  }
-
-  if (cascadeIndex === 2) {
-    return { text: 'AMAZING!', tone: 'combo' };
-  }
-
-  return { text: 'EPIC!', tone: 'cascade' };
-}
-
-function getMatchFeedback(matchPower) {
-  if (matchPower >= 5) {
-    return { text: 'PAWSOME!', tone: 'pawsome' };
-  }
-
-  if (matchPower >= 4) {
-    return { text: 'NICE!', tone: 'nice' };
-  }
-
-  return null;
-}
-
-function getObjectiveFeedback({ objectiveCount, isTreatGoal, isMudGoal }) {
-  if (isTreatGoal) {
-    return objectiveCount > 1
-      ? { text: 'TREAT TIME!', tone: 'pawsome' }
-      : { text: 'TREAT!', tone: 'nice' };
-  }
-
-  if (isMudGoal) {
-    return objectiveCount > 1
-      ? { text: 'SQUEAKY CLEAN!', tone: 'pawsome' }
-      : { text: 'CLEAN!', tone: 'nice' };
-  }
-
-  return null;
 }
 
 function getMarkedObjectiveBoard(board, objectiveState) {

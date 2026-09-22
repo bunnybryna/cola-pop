@@ -5,7 +5,7 @@ const SOUND_PATHS = {
   'paw-shuffle': '/assets/sounds/special.ogg',
   epic: '/assets/sounds/epic.mp3',
   amazing: '/assets/sounds/amazing.mp3',
-  unbelievable: '/assets/sounds/unbelievable.mp3',
+  legendary: '/assets/sounds/legendary.mp3',
   goal: '/assets/sounds/goal.ogg',
   'bark-happy': '/assets/sounds/bark-happy.ogg',
   invalid: '/assets/sounds/invalid.ogg',
@@ -20,7 +20,7 @@ const VOLUMES = {
   'paw-shuffle': 0.34,
   epic: 0.45,
   amazing: 0.48,
-  unbelievable: 0.52,
+  legendary: 0.52,
   goal: 0.38,
   'bark-happy': 0.42,
   invalid: 0.28,
@@ -30,8 +30,32 @@ const VOLUMES = {
 
 const players = new Map();
 const stopTimers = new Map();
+const PRIMARY_SOUNDS = new Set(['pop', 'special', 'goal', 'epic', 'amazing', 'legendary', 'victory']);
 
 export function playSound(name) {
+  playSoundEffect(name);
+}
+
+export function playPrimarySound(name) {
+  stopPrimarySounds();
+  playSoundEffect(name);
+}
+
+export function stopPrimarySounds() {
+  for (const name of PRIMARY_SOUNDS) {
+    const audio = players.get(name);
+
+    if (!audio) {
+      continue;
+    }
+
+    window.clearTimeout(stopTimers.get(name));
+    audio.pause();
+    audio.currentTime = 0;
+  }
+}
+
+function playSoundEffect(name) {
   const source = SOUND_PATHS[name];
 
   if (!source) {

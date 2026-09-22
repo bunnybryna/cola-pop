@@ -262,6 +262,40 @@ export function findBottomEntities(board, config, entityType) {
   return found;
 }
 
+export function getBottomEntityCollectionStep(board, config, tileTypes, entityType, options = {}) {
+  const targetCount = options.targetCount ?? config.objective?.targetCount ?? Infinity;
+  const collected = options.collected ?? 0;
+  const spawnedEntities = options.spawnedEntities ?? countEntities(board, entityType);
+  const remainingNeeded = Math.max(0, targetCount - collected);
+  const entityCells = findBottomEntities(board, config, entityType).slice(0, remainingNeeded);
+
+  if (entityCells.length === 0) {
+    return null;
+  }
+
+  let nextBoard = clearTileEntities(board, entityCells);
+  nextBoard = applyGravityAndRefill(nextBoard, config, tileTypes);
+
+  let nextSpawnedEntities = spawnedEntities;
+  const nextCollected = Math.min(targetCount, collected + entityCells.length);
+
+  if (
+    nextCollected >= (config.objective?.spawnAfterCollected ?? Infinity) &&
+    nextSpawnedEntities < targetCount &&
+    countEntities(nextBoard, entityType) < targetCount - nextCollected
+  ) {
+    nextBoard = spawnGravityEntity(nextBoard, config, entityType);
+    nextSpawnedEntities += 1;
+  }
+
+  return {
+    board: nextBoard,
+    cells: entityCells,
+    collected: nextCollected,
+    spawnedEntities: nextSpawnedEntities,
+  };
+}
+
 export function countEntities(board, entityType) {
   let count = 0;
 
@@ -278,6 +312,24 @@ export function countEntities(board, entityType) {
 
 export function getEntityPositions(board, entityType) {
   return getEntityCells(board, entityType);
+}
+
+export function getTerrainPositions(board, terrainType) {
+  return getTerrainCells(board, terrainType);
+}
+
+export function getNextEntityStallCounts({ entities, progressedEntityKeys, previousStalledMoves = {}, config }) {
+  const nextStalledMoves = {};
+
+  for (const entity of entities) {
+    if (!isEntityInProgressZone(entity, config) || progressedEntityKeys.has(entity.key)) {
+      continue;
+    }
+
+    nextStalledMoves[entity.key] = Math.min(3, (previousStalledMoves[entity.key] ?? 0) + 1);
+  }
+
+  return nextStalledMoves;
 }
 
 export function markTileEntities(board, cells, state, extra = {}) {
@@ -332,7 +384,7 @@ export function spawnGravityEntity(board, config, entityType) {
   }
 
   const { row, col } = pickWeightedGravityEntityCandidate(candidatePool, config, entityConfig);
-  next[row][col].tile = createGravityEntityTile(entityConfig, 'entering');
+  next[row][col].tile = createGravityEntityTile(entityConfig, 'new-ball');
   return next;
 }
 
@@ -459,33 +511,71 @@ export function hasUsefulMoveForEntityProgress(board, config, entityType, target
   );
 }
 
-export function reshuffleTilesNearEntity(board, config, entityType, options = {}) {
-  const maxAttempts = options.maxAttempts ?? 60;
-  const rowRadius = options.rowRadius ?? 2;
-  const colRadius = options.colRadius ?? 2;
+export function hasUsefulMoveForTerrainClean(board, config, terrainType) {
+  return getUsefulTerrainCleanOptions(board, config, terrainType).length > 0;
+}
+
+export function repairStuckTerrainClean(board, config, terrainType) {
+  const terrainCells = getTerrainCells(board, terrainType);
+
+  if (terrainCells.length === 0) {
+    return { reason: 'No muddy cells remain.' };
+  }
+
+  if (hasUsefulMoveForTerrainClean(board, config, terrainType)) {
+    return { reason: 'A useful mud-cleaning swap already exists.' };
+  }
+
+  const candidates = terrainCells
+    .filter((terrainCell) => isSwappableTile(getCellTile(board[terrainCell.row]?.[terrainCell.col])))
+    .sort((a, b) => a.row - b.row || a.col - b.col);
+
+  for (const terrainCell of candidates) {
+    const repair = tryBuildTargetedTerrainRepair(board, config, terrainType, terrainCell);
+
+    if (repair) {
+      return repair;
+    }
+  }
+
+  return { reason: 'Could not build a verified mud-cleaning swap without automatic matches.' };
+}
+
+export function repairStuckEntityProgress(board, config, entityType, options = {}) {
   const targetEntityKey = options.targetEntityKey ?? null;
   const candidates = getEntityCells(board, entityType)
     .filter(
       (entityCell) =>
-        (!targetEntityKey || entityCell.key === targetEntityKey) && isEntityInProgressZone(entityCell, config),
+        (!targetEntityKey || entityCell.key === targetEntityKey) &&
+        isEntityInProgressZone(entityCell, config) &&
+        entityCell.row < config.height - 1,
     )
     .sort((a, b) => b.row - a.row);
 
-  for (const entityCell of candidates) {
-    const regionCells = getEntityShuffleRegionCells(board, config, entityCell, rowRadius, colRadius);
+  if (candidates.length === 0) {
+    return { reason: 'No eligible stuck ball in rows 5-6.' };
+  }
 
-    if (regionCells.length < 5) {
+  for (const entityCell of candidates) {
+    if (hasUsefulMoveForEntity(board, config, entityCell)) {
       continue;
     }
 
-    const shuffled = tryShuffleRegionForEntityProgress(board, config, entityType, regionCells, maxAttempts, entityCell.key);
+    const preservedUsefulKeys = getUsefulEntityKeys(board, config, entityType, entityCell.key);
+    const preservedRepair = tryBuildTargetedEntityRepair(board, config, entityType, entityCell, preservedUsefulKeys);
 
-    if (shuffled) {
-      return shuffled;
+    if (preservedRepair) {
+      return preservedRepair;
+    }
+
+    const repair = tryBuildTargetedEntityRepair(board, config, entityType, entityCell, null);
+
+    if (repair) {
+      return repair;
     }
   }
 
-  return null;
+  return { reason: 'Could not build a verified ball-progress swap without automatic matches.' };
 }
 
 export function getCollection(matches, board) {
@@ -1422,7 +1512,427 @@ function getObjectCells(board, objectType) {
   return cells;
 }
 
-function getEntityShuffleRegionCells(board, config, entityCell, rowRadius, colRadius) {
+function getUsefulTerrainCleanOptions(board, config, terrainType) {
+  const options = [];
+
+  for (let row = 0; row < config.height; row += 1) {
+    for (let col = 0; col < config.width; col += 1) {
+      const current = { row, col };
+      const candidates = [
+        { row, col: col + 1 },
+        { row: row + 1, col },
+      ];
+
+      for (const target of candidates) {
+        if (target.row >= config.height || target.col >= config.width || !canSwapCells(board, current, target)) {
+          continue;
+        }
+
+        const swapped = swapTiles(board, current, target);
+        const matches = findMatches(swapped, config);
+        const cleaned = findMatchedTerrain(matches, swapped, terrainType);
+
+        if (cleaned.length > 0) {
+          options.push({
+            from: current,
+            to: target,
+            cleaned,
+          });
+        }
+      }
+    }
+  }
+
+  return options;
+}
+
+function tryBuildTargetedTerrainRepair(board, config, terrainType, terrainCell) {
+  const patterns = getTerrainCleanRepairPatterns(board, config, terrainCell);
+  const scopeCells = getTerrainRepairScopeCells(board, config, terrainCell, 2, 3);
+  const swappableScope = scopeCells.filter((cell) => isSwappableTile(getCellTile(board[cell.row]?.[cell.col])));
+  const typeCounts = getTileTypeCounts(swappableScope, board);
+  const candidateTypes = [...typeCounts.entries()]
+    .filter(([, count]) => count >= 3)
+    .map(([type]) => type)
+    .sort();
+
+  for (const pattern of patterns) {
+    for (const targetType of candidateTypes) {
+      const targetSources = swappableScope
+        .filter((cell) => getCellTile(board[cell.row][cell.col])?.type === targetType)
+        .sort(compareCellsByDistance(pattern.center, terrainCell));
+
+      if (targetSources.length < 3) {
+        continue;
+      }
+
+      const blockerSources = swappableScope
+        .filter((cell) => getCellTile(board[cell.row][cell.col])?.type !== targetType)
+        .sort(compareCellsByDistance(pattern.swapTo, terrainCell));
+      const targetSourceGroups = getSourceGroups(targetSources, 3, 24);
+
+      for (const targetSourceGroup of targetSourceGroups) {
+        for (const blockerSource of blockerSources) {
+          const repair = buildTerrainRepairCandidate(
+            board,
+            config,
+            terrainType,
+            terrainCell,
+            pattern,
+            targetSourceGroup,
+            blockerSource,
+          );
+
+          if (repair) {
+            return repair;
+          }
+        }
+      }
+    }
+  }
+
+  return null;
+}
+
+function buildTerrainRepairCandidate(board, config, terrainType, terrainCell, pattern, targetSources, blockerSource) {
+  const targetDestinations = [pattern.center, pattern.side, pattern.swapFrom];
+  const assignments = new Map();
+  const usedSourceKeys = new Set();
+
+  for (const destination of targetDestinations) {
+    const source = targetSources.find(
+      (cell) => !usedSourceKeys.has(makeCellKey(cell)) && isSameCell(cell, destination),
+    ) ?? targetSources.find((cell) => !usedSourceKeys.has(makeCellKey(cell)));
+
+    if (!source) {
+      return null;
+    }
+
+    assignments.set(makeCellKey(destination), { ...getCellTile(board[source.row][source.col]), state: 'paw-shuffle' });
+    usedSourceKeys.add(makeCellKey(source));
+  }
+
+  if (usedSourceKeys.has(makeCellKey(blockerSource))) {
+    return null;
+  }
+
+  assignments.set(makeCellKey(pattern.swapTo), { ...getCellTile(board[blockerSource.row][blockerSource.col]), state: 'paw-shuffle' });
+  usedSourceKeys.add(makeCellKey(blockerSource));
+
+  const affectedCells = getUniqueCells([
+    ...targetDestinations,
+    pattern.swapTo,
+    ...targetSources.filter((cell) => usedSourceKeys.has(makeCellKey(cell))),
+    blockerSource,
+  ]);
+  const assignedKeys = new Set(assignments.keys());
+  const remainingTiles = affectedCells
+    .filter((cell) => !usedSourceKeys.has(makeCellKey(cell)))
+    .map((cell) => ({ ...getCellTile(board[cell.row][cell.col]), state: 'paw-shuffle' }));
+  const remainingCells = affectedCells.filter((cell) => !assignedKeys.has(makeCellKey(cell)));
+
+  if (remainingTiles.length !== remainingCells.length) {
+    return null;
+  }
+
+  const candidate = cloneBoard(board);
+
+  for (const cell of remainingCells) {
+    assignments.set(makeCellKey(cell), remainingTiles.shift());
+  }
+
+  for (const cell of affectedCells) {
+    const tile = assignments.get(makeCellKey(cell));
+
+    if (!tile) {
+      return null;
+    }
+
+    candidate[cell.row][cell.col].tile = tile;
+  }
+
+  if (!isValidTerrainRepair(candidate, board, config, terrainType, terrainCell)) {
+    return null;
+  }
+
+  return {
+    board: candidate,
+    cells: affectedCells,
+  };
+}
+
+function isValidTerrainRepair(candidate, originalBoard, config, terrainType, terrainCell) {
+  if (findMatches(candidate, config).cells.length > 0 || !hasPossibleMove(candidate, config)) {
+    return false;
+  }
+
+  if (!hasUsefulMoveForTerrainClean(candidate, config, terrainType)) {
+    return false;
+  }
+
+  const originalTerrainKeys = new Set(getTerrainCells(originalBoard, terrainType).map(makeCellKey));
+  const candidateTerrainKeys = new Set(getTerrainCells(candidate, terrainType).map(makeCellKey));
+
+  if (originalTerrainKeys.size !== candidateTerrainKeys.size) {
+    return false;
+  }
+
+  for (const key of originalTerrainKeys) {
+    if (!candidateTerrainKeys.has(key)) {
+      return false;
+    }
+  }
+
+  return getUsefulTerrainCleanOptions(candidate, config, terrainType).some((option) =>
+    option.cleaned.some((cell) => isSameCell(cell, terrainCell)),
+  );
+}
+
+function getTerrainCleanRepairPatterns(board, config, terrainCell) {
+  const directions = [
+    {
+      side: { row: terrainCell.row, col: terrainCell.col - 1 },
+      swapTo: { row: terrainCell.row, col: terrainCell.col + 1 },
+      swapSources: [
+        { row: terrainCell.row - 1, col: terrainCell.col + 1 },
+        { row: terrainCell.row + 1, col: terrainCell.col + 1 },
+      ],
+    },
+    {
+      side: { row: terrainCell.row, col: terrainCell.col + 1 },
+      swapTo: { row: terrainCell.row, col: terrainCell.col - 1 },
+      swapSources: [
+        { row: terrainCell.row - 1, col: terrainCell.col - 1 },
+        { row: terrainCell.row + 1, col: terrainCell.col - 1 },
+      ],
+    },
+    {
+      side: { row: terrainCell.row - 1, col: terrainCell.col },
+      swapTo: { row: terrainCell.row + 1, col: terrainCell.col },
+      swapSources: [
+        { row: terrainCell.row + 1, col: terrainCell.col - 1 },
+        { row: terrainCell.row + 1, col: terrainCell.col + 1 },
+      ],
+    },
+    {
+      side: { row: terrainCell.row + 1, col: terrainCell.col },
+      swapTo: { row: terrainCell.row - 1, col: terrainCell.col },
+      swapSources: [
+        { row: terrainCell.row - 1, col: terrainCell.col - 1 },
+        { row: terrainCell.row - 1, col: terrainCell.col + 1 },
+      ],
+    },
+  ];
+
+  return directions.flatMap((pattern) =>
+    pattern.swapSources
+      .map((swapFrom) => ({
+        center: terrainCell,
+        side: pattern.side,
+        swapTo: pattern.swapTo,
+        swapFrom,
+      }))
+      .filter((candidate) =>
+        [candidate.center, candidate.side, candidate.swapTo, candidate.swapFrom].every(
+          (cell) => isInsideBoard(cell, config) && isSwappableTile(getCellTile(board[cell.row]?.[cell.col])),
+        ),
+      ),
+  );
+}
+
+function getTerrainRepairScopeCells(board, config, terrainCell, rowRadius, colRadius) {
+  const cells = [];
+  const minRow = Math.max(0, terrainCell.row - rowRadius);
+  const maxRow = Math.min(config.height - 1, terrainCell.row + rowRadius);
+  const minCol = Math.max(0, terrainCell.col - colRadius);
+  const maxCol = Math.min(config.width - 1, terrainCell.col + colRadius);
+
+  for (let row = minRow; row <= maxRow; row += 1) {
+    for (let col = minCol; col <= maxCol; col += 1) {
+      cells.push({ row, col });
+    }
+  }
+
+  return cells;
+}
+
+function tryBuildTargetedEntityRepair(board, config, entityType, entityCell, preservedUsefulKeys) {
+  const patterns = getEntityProgressRepairPatterns(board, config, entityCell);
+  const scopeCells = getEntityRepairScopeCells(board, config, entityCell, 3, 3);
+  const swappableScope = scopeCells.filter((cell) => isSwappableTile(getCellTile(board[cell.row]?.[cell.col])));
+  const typeCounts = getTileTypeCounts(swappableScope, board);
+  const candidateTypes = [...typeCounts.entries()]
+    .filter(([, count]) => count >= 3)
+    .map(([type]) => type)
+    .sort();
+
+  for (const pattern of patterns) {
+    for (const targetType of candidateTypes) {
+      const targetSources = swappableScope
+        .filter((cell) => getCellTile(board[cell.row][cell.col])?.type === targetType)
+        .sort(compareCellsByDistance(pattern.below, entityCell));
+
+      if (targetSources.length < 3) {
+        continue;
+      }
+
+      const blockerSources = swappableScope
+        .filter((cell) => getCellTile(board[cell.row][cell.col])?.type !== targetType)
+        .sort(compareCellsByDistance(pattern.swapTo, entityCell));
+      const targetSourceGroups = getSourceGroups(targetSources, 3, 20);
+
+      for (const targetSourceGroup of targetSourceGroups) {
+        for (const blockerSource of blockerSources) {
+          const repair = buildEntityRepairCandidate(
+            board,
+            config,
+            entityType,
+            entityCell,
+            pattern,
+            targetSourceGroup,
+            blockerSource,
+            preservedUsefulKeys,
+          );
+
+          if (repair) {
+            return repair;
+          }
+        }
+      }
+    }
+  }
+
+  return null;
+}
+
+function buildEntityRepairCandidate(
+  board,
+  config,
+  entityType,
+  entityCell,
+  pattern,
+  targetSources,
+  blockerSource,
+  preservedUsefulKeys,
+) {
+  const targetDestinations = [pattern.below, pattern.side, pattern.swapFrom];
+  const assignments = new Map();
+  const usedSourceKeys = new Set();
+
+  for (const destination of targetDestinations) {
+    const source = targetSources.find(
+      (cell) => !usedSourceKeys.has(makeCellKey(cell)) && isSameCell(cell, destination),
+    ) ?? targetSources.find((cell) => !usedSourceKeys.has(makeCellKey(cell)));
+
+    if (!source) {
+      return null;
+    }
+
+    assignments.set(makeCellKey(destination), { ...getCellTile(board[source.row][source.col]), state: 'paw-shuffle' });
+    usedSourceKeys.add(makeCellKey(source));
+  }
+
+  if (usedSourceKeys.has(makeCellKey(blockerSource))) {
+    return null;
+  }
+
+  assignments.set(makeCellKey(pattern.swapTo), { ...getCellTile(board[blockerSource.row][blockerSource.col]), state: 'paw-shuffle' });
+  usedSourceKeys.add(makeCellKey(blockerSource));
+
+  const affectedCells = getUniqueCells([
+    ...targetDestinations,
+    pattern.swapTo,
+    ...targetSources.filter((cell) => usedSourceKeys.has(makeCellKey(cell))),
+    blockerSource,
+  ]);
+  const assignedKeys = new Set(assignments.keys());
+  const remainingTiles = affectedCells
+    .filter((cell) => !usedSourceKeys.has(makeCellKey(cell)))
+    .map((cell) => ({ ...getCellTile(board[cell.row][cell.col]), state: 'paw-shuffle' }));
+  const remainingCells = affectedCells.filter((cell) => !assignedKeys.has(makeCellKey(cell)));
+
+  if (remainingTiles.length !== remainingCells.length) {
+    return null;
+  }
+
+  const candidate = cloneBoard(board);
+
+  for (const cell of remainingCells) {
+    assignments.set(makeCellKey(cell), remainingTiles.shift());
+  }
+
+  for (const cell of affectedCells) {
+    const tile = assignments.get(makeCellKey(cell));
+
+    if (!tile) {
+      return null;
+    }
+
+    candidate[cell.row][cell.col].tile = tile;
+  }
+
+  if (!isValidEntityRepair(candidate, config, entityType, entityCell.key, preservedUsefulKeys)) {
+    return null;
+  }
+
+  return {
+    board: candidate,
+    cells: affectedCells,
+  };
+}
+
+function isValidEntityRepair(candidate, config, entityType, targetEntityKey, preservedUsefulKeys) {
+  if (findMatches(candidate, config).cells.length > 0 || !hasPossibleMove(candidate, config)) {
+    return false;
+  }
+
+  if (!hasUsefulMoveForEntityProgress(candidate, config, entityType, targetEntityKey)) {
+    return false;
+  }
+
+  if (!preservedUsefulKeys || preservedUsefulKeys.size === 0) {
+    return true;
+  }
+
+  const nextUsefulKeys = getUsefulEntityKeys(candidate, config, entityType, targetEntityKey);
+
+  for (const key of preservedUsefulKeys) {
+    if (!nextUsefulKeys.has(key)) {
+      return false;
+    }
+  }
+
+  return true;
+}
+
+function getEntityProgressRepairPatterns(board, config, entityCell) {
+  const below = { row: entityCell.row + 1, col: entityCell.col };
+
+  if (below.row >= config.height) {
+    return [];
+  }
+
+  return [
+    {
+      below,
+      side: { row: below.row, col: below.col - 1 },
+      swapTo: { row: below.row, col: below.col + 1 },
+      swapFrom: { row: below.row - 1, col: below.col + 1 },
+    },
+    {
+      below,
+      side: { row: below.row, col: below.col + 1 },
+      swapTo: { row: below.row, col: below.col - 1 },
+      swapFrom: { row: below.row - 1, col: below.col - 1 },
+    },
+  ].filter((pattern) =>
+    [pattern.below, pattern.side, pattern.swapTo, pattern.swapFrom].every(
+      (cell) => isInsideBoard(cell, config) && isSwappableTile(getCellTile(board[cell.row]?.[cell.col])),
+    ),
+  );
+}
+
+function getEntityRepairScopeCells(board, config, entityCell, rowRadius, colRadius) {
   const cells = [];
   const minRow = Math.max(0, entityCell.row - rowRadius);
   const maxRow = config.height - 1;
@@ -1431,62 +1941,88 @@ function getEntityShuffleRegionCells(board, config, entityCell, rowRadius, colRa
 
   for (let row = minRow; row <= maxRow; row += 1) {
     for (let col = minCol; col <= maxCol; col += 1) {
-      const tile = getCellTile(board[row]?.[col]);
-
-      if (isSwappableTile(tile)) {
-        cells.push({ row, col });
-      }
+      cells.push({ row, col });
     }
   }
 
   return cells;
 }
 
-function tryShuffleRegionForEntityProgress(board, config, entityType, regionCells, maxAttempts, targetEntityKey) {
-  const sourceTiles = regionCells.map((cell) => ({ ...getCellTile(board[cell.row][cell.col]) }));
+function getUsefulEntityKeys(board, config, entityType, excludedKey = null) {
+  return new Set(
+    getEntityCells(board, entityType)
+      .filter((entityCell) => entityCell.key !== excludedKey && hasUsefulMoveForEntity(board, config, entityCell))
+      .map((entityCell) => entityCell.key),
+  );
+}
 
-  for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
-    const shuffledTiles = shuffleTiles(sourceTiles).map((tile) => ({
-      ...tile,
-      key: crypto.randomUUID(),
-      state: 'paw-shuffle',
-    }));
-    const candidate = cloneBoard(board);
+function getTileTypeCounts(cells, board) {
+  const counts = new Map();
 
-    for (let index = 0; index < regionCells.length; index += 1) {
-      const cell = regionCells[index];
-      candidate[cell.row][cell.col].tile = shuffledTiles[index];
-    }
+  for (const cell of cells) {
+    const tile = getCellTile(board[cell.row]?.[cell.col]);
 
-    if (
-      findMatches(candidate, config).cells.length === 0 &&
-      hasPossibleMove(candidate, config) &&
-      hasUsefulMoveForEntityProgress(candidate, config, entityType, targetEntityKey)
-    ) {
-      return {
-        board: candidate,
-        cells: regionCells,
-      };
+    if (tile) {
+      counts.set(tile.type, (counts.get(tile.type) ?? 0) + 1);
     }
   }
 
-  return null;
+  return counts;
 }
 
-function shuffleTiles(tiles) {
-  const shuffled = tiles.map((tile) => ({ ...tile }));
+function getSourceGroups(sources, groupSize, limit) {
+  const groups = [];
 
-  for (let index = shuffled.length - 1; index > 0; index -= 1) {
-    const swapIndex = Math.floor(Math.random() * (index + 1));
-    const current = shuffled[index];
-    shuffled[index] = shuffled[swapIndex];
-    shuffled[swapIndex] = current;
+  function visit(startIndex, group) {
+    if (groups.length >= limit) {
+      return;
+    }
+
+    if (group.length === groupSize) {
+      groups.push(group);
+      return;
+    }
+
+    for (let index = startIndex; index < sources.length; index += 1) {
+      visit(index + 1, [...group, sources[index]]);
+    }
   }
 
-  return shuffled;
+  visit(0, []);
+  return groups;
 }
 
-function isEntityInProgressZone(entityCell, config) {
+function getUniqueCells(cells) {
+  const seen = new Set();
+  const unique = [];
+
+  for (const cell of cells) {
+    const key = makeCellKey(cell);
+
+    if (seen.has(key)) {
+      continue;
+    }
+
+    seen.add(key);
+    unique.push(cell);
+  }
+
+  return unique;
+}
+
+function compareCellsByDistance(anchor, entityCell) {
+  return (a, b) =>
+    getManhattanDistance(a, anchor) - getManhattanDistance(b, anchor) ||
+    getManhattanDistance(a, entityCell) - getManhattanDistance(b, entityCell) ||
+    a.row - b.row ||
+    a.col - b.col;
+}
+
+function isSameCell(a, b) {
+  return a.row === b.row && a.col === b.col;
+}
+
+export function isEntityInProgressZone(entityCell, config) {
   return entityCell.row >= config.height - 3 && entityCell.row < config.height;
 }
 
