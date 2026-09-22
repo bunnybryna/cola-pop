@@ -1,0 +1,7 @@
+<?xml version='1.0' encoding='utf-8'?>
+<resources>
+    <string name="app_name">COLA &amp; CO.</string>
+    <string name="title_activity_main">COLA &amp; CO.</string>
+    <string name="package_name">com.bunnybryna.colaco</string>
+    <string name="custom_url_scheme">com.bunnybryna.colaco</string>
+</resources>
