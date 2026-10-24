@@ -1,7 +1,10 @@
 export function makeInitialBoard(config, tileTypes) {
   let fallback;
+  let bestPowerPalBoard;
+  let bestPowerPalScore = -Infinity;
+  const attempts = config.catPower?.initialBoard?.layoutAttempts ?? 200;
 
-  for (let attempts = 0; attempts < 200; attempts += 1) {
+  for (let attempt = 0; attempt < attempts; attempt += 1) {
     const board = createBoardWithoutMatches(config, tileTypes);
 
     if (!board) {
@@ -10,18 +13,33 @@ export function makeInitialBoard(config, tileTypes) {
 
     fallback = board;
 
-    if (
+    const isBaseFair =
       findMatches(board, config).cells.length === 0 &&
       hasPossibleMove(board, config) &&
       isWithinAllObjectPlacementGoals(board, config) &&
       isWithinAllTerrainPlacementGoals(board, config) &&
-      isFairInitialBoard(board, config)
-    ) {
+      isFairInitialBoard(board, config);
+
+    if (!isBaseFair) {
+      continue;
+    }
+
+    if (!config.catPower?.enabled) {
+      return board;
+    }
+
+    const powerPalScore = getPowerPalBoardScore(board, config);
+    if (powerPalScore > bestPowerPalScore) {
+      bestPowerPalBoard = board;
+      bestPowerPalScore = powerPalScore;
+    }
+
+    if (isFairPowerPalInitialBoard(board, config)) {
       return board;
     }
   }
 
-  return fallback;
+  return bestPowerPalBoard ?? fallback;
 }
 
 export function createBoardWithoutMatches(config, tileTypes) {
@@ -129,6 +147,101 @@ export function findMatches(board, config) {
     cells: [...matched].map(parseCellKey),
     groups,
   };
+}
+
+export function getCatCreationPlans(matches, board, config, options = {}) {
+  if (!config.catPower?.enabled) {
+    return [];
+  }
+
+  const swapEndpoints = options.swapEndpoints ?? (options.swapDestination ? [options.swapDestination] : null);
+  const overlapKeys = new Set();
+  const groupKeys = matches.groups.map((group) => new Set(group.cells.map(makeCellKey)));
+
+  for (let index = 0; index < groupKeys.length; index += 1) {
+    for (let otherIndex = index + 1; otherIndex < groupKeys.length; otherIndex += 1) {
+      for (const key of groupKeys[index]) {
+        if (groupKeys[otherIndex].has(key)) {
+          overlapKeys.add(key);
+        }
+      }
+    }
+  }
+
+  const eligibleGroups = matches.groups.filter((group) => {
+    if (![4, 5].includes(group.cells.length) || group.cells.some((cell) => overlapKeys.has(makeCellKey(cell)))) {
+      return false;
+    }
+
+    const containsExistingSpecial = group.cells.some((cell) => getCellTile(board[cell.row]?.[cell.col])?.special);
+    return !containsExistingSpecial;
+  });
+
+  // Both swapped tiles receive a destination. Center fallbacks are reserved for
+  // cascade-created groups, which have no player endpoints.
+  const groupsToCreate = swapEndpoints
+    ? eligibleGroups.flatMap((group) => {
+        const destination = swapEndpoints.find((endpoint) =>
+          group.cells.some((cell) => makeCellKey(cell) === makeCellKey(endpoint)),
+        );
+        return destination ? [{ group, destination }] : [];
+      })
+    : eligibleGroups.map((group) => ({
+        group,
+        destination: group.cells[group.cells.length === 5 ? 2 : 1],
+      }));
+
+  return groupsToCreate.flatMap(({ group, destination }) => {
+    const orientation = group.cells.every((cell) => cell.row === group.cells[0].row) ? 'horizontal' : 'vertical';
+    const special = orientation === 'horizontal' ? 'tabby-column' : 'tuxedo-row';
+    const tile = getCellTile(board[destination.row]?.[destination.col]);
+
+    return tile
+      ? [{ cell: { ...destination }, type: tile.type, special, orientation }]
+      : [];
+  });
+}
+
+export function getCatPowerActivations(matches, board, config) {
+  if (!config.catPower?.enabled) {
+    return { cells: [], clearCells: [] };
+  }
+
+  const cells = matches.cells.filter((cell) => getCellTile(board[cell.row]?.[cell.col])?.special);
+  const clearCells = new Map(matches.cells.map((cell) => [makeCellKey(cell), cell]));
+
+  for (const cell of cells) {
+    const special = getCellTile(board[cell.row][cell.col]).special;
+    const length = special === 'tuxedo-row' ? config.width : config.height;
+
+    for (let index = 0; index < length; index += 1) {
+      const target = special === 'tuxedo-row' ? { row: cell.row, col: index } : { row: index, col: cell.col };
+      if (getCellTile(board[target.row]?.[target.col])) {
+        clearCells.set(makeCellKey(target), target);
+      }
+    }
+  }
+
+  return { cells, clearCells: [...clearCells.values()] };
+}
+
+export function placeCatTiles(board, plans) {
+  if (plans.length === 0) {
+    return board;
+  }
+
+  const next = cloneBoard(board);
+
+  for (const plan of plans) {
+    next[plan.cell.row][plan.cell.col].tile = {
+      key: crypto.randomUUID(),
+      type: plan.type,
+      special: plan.special,
+      state: 'cat-created',
+    };
+  }
+
+  return next;
 }
 
 export function markCells(board, cells, state, extra = {}) {
@@ -453,6 +566,35 @@ export function hasPossibleMove(board, config) {
   }
 
   return false;
+}
+
+export function getCatCreatingSwapOptions(board, config) {
+  if (!config.catPower?.enabled) {
+    return [];
+  }
+
+  const options = [];
+
+  for (let row = 0; row < config.height; row += 1) {
+    for (let col = 0; col < config.width; col += 1) {
+      const from = { row, col };
+
+      for (const to of [{ row, col: col + 1 }, { row: row + 1, col }]) {
+        if (to.row >= config.height || to.col >= config.width || !canSwapCells(board, from, to)) {
+          continue;
+        }
+
+        const swapped = swapTiles(board, from, to);
+        const plans = getCatCreationPlans(findMatches(swapped, config), swapped, config, { swapEndpoints: [to, from] });
+
+        if (plans.length > 0) {
+          options.push({ from, to, plans });
+        }
+      }
+    }
+  }
+
+  return options;
 }
 
 export function reshuffleBoard(board, config, tileTypes) {
@@ -1359,6 +1501,39 @@ function isWithinTerrainPlacementGoals(board, config, terrainConfig) {
     preferredRowCount >= (placement.minPreferredRowCount ?? 0) &&
     adjacentPairCount >= (placement.minAdjacentPairs ?? 0) &&
     adjacentPairCount <= (placement.maxAdjacentPairs ?? Infinity)
+  );
+}
+
+function getPowerPalBoardScore(board, config) {
+  const options = getCatCreatingSwapOptions(board, config);
+  const axes = new Set(options.flatMap((option) => option.plans.map((plan) => plan.orientation)));
+  const spreadPairs = options.flatMap((option, index) =>
+    options.slice(index + 1).map((other) => getManhattanDistance(option.to, other.to)),
+  );
+  const bestSpread = Math.max(0, ...spreadPairs);
+
+  return options.length * 100 + axes.size * 30 + bestSpread;
+}
+
+function isFairPowerPalInitialBoard(board, config) {
+  const placement = config.catPower?.initialBoard ?? {};
+  const options = getCatCreatingSwapOptions(board, config);
+  const minimum = placement.minimumImmediateCreations ?? 2;
+
+  if (options.length < minimum) {
+    return false;
+  }
+
+  if (placement.preferBothAxes) {
+    const axes = new Set(options.flatMap((option) => option.plans.map((plan) => plan.orientation)));
+    if (axes.size < 2) {
+      return false;
+    }
+  }
+
+  const minimumSpread = placement.minimumSpread ?? 0;
+  return options.some((option, index) =>
+    options.slice(index + 1).some((other) => getManhattanDistance(option.to, other.to) >= minimumSpread),
   );
 }
 

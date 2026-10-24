@@ -1,7 +1,7 @@
 import { PawPrint, RotateCcw } from 'lucide-react';
 import { useEffect, useMemo, useRef, useState } from 'react';
-import { playPrimarySound, playSound, stopPrimarySounds } from './audio/sounds.js';
-import { LEVELS, MASCOT_STATES, TILE_TYPES } from './config/level.js';
+import { initializeGameplayAudio, playCatPower, playPrimarySound, playSound, stopPrimarySounds } from './audio/sounds.js';
+import { getNextLevelIndex, LEVELS, MASCOT_STATES, TILE_TYPES } from './config/level.js';
 import { getPrimaryReward } from './game/rewards.js';
 import {
   applyGravityAndRefill,
@@ -11,6 +11,8 @@ import {
   clearObjects,
   clearTerrain,
   countEntities,
+  getCatCreationPlans,
+  getCatPowerActivations,
   findAdjacentObjects,
   findMatchedTerrain,
   findMatches,
@@ -28,6 +30,7 @@ import {
   markObjects,
   markTileEntities,
   markTerrain,
+  placeCatTiles,
   resetTileStates,
   repairStuckEntityProgress,
   repairStuckTerrainClean,
@@ -38,6 +41,7 @@ import {
 } from './game/match3.js';
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+const nextVisualFrame = () => new Promise((resolve) => window.requestAnimationFrame(resolve));
 
 function createGame(levelConfig) {
   return {
@@ -69,12 +73,14 @@ export default function App() {
   const [matchFeedback, setMatchFeedback] = useState(null);
   const [shuffleFeedback, setShuffleFeedback] = useState(null);
   const [ballEntranceFeedback, setBallEntranceFeedback] = useState(null);
+  const [catEffects, setCatEffects] = useState([]);
   const [collectFlyers, setCollectFlyers] = useState([]);
   const [progressPulseKey, setProgressPulseKey] = useState(0);
   const [movesCallout, setMovesCallout] = useState(null);
   const [mascotReaction, setMascotReaction] = useState(null);
   const [victoryCelebration, setVictoryCelebration] = useState(false);
   const tileRefs = useRef(new Map());
+  const boardRef = useRef(null);
   const goalTargetRef = useRef(null);
   const mascotTimerRef = useRef(null);
   const matchFeedbackTimerRef = useRef(null);
@@ -82,6 +88,7 @@ export default function App() {
   const ballEntranceTimerRef = useRef(null);
   const movesCalloutTimerRef = useRef(null);
   const collectFlyersTimerRef = useRef(null);
+  const catEffectsTimerRef = useRef(null);
   const primaryRewardTokenRef = useRef(0);
   const inputLockedRef = useRef(false);
 
@@ -93,6 +100,7 @@ export default function App() {
   const isTreatGoal = levelConfig.goalType === 'collectTreats';
   const isMudGoal = levelConfig.goalType === 'clearMud';
   const isDropGoal = levelConfig.goalType === 'dropEntities';
+  const isCatPowerGoal = levelConfig.goalType === 'activateCatPowers';
   const objectiveObject = isTreatGoal ? objectLookup.get(levelConfig.objective.treatType) : null;
   const objectiveTerrain = isMudGoal
     ? (levelConfig.terrain ?? []).find((terrain) => terrain.id === levelConfig.objective.terrainType)
@@ -108,7 +116,8 @@ export default function App() {
   const mascotState = getMascotState(game, mascotReaction, levelConfig);
   const displayedCollected = Math.min(game.collected, objectiveTarget);
   const progress = Math.min(100, (displayedCollected / objectiveTarget) * 100);
-  const hasNextLevel = activeLevelIndex < LEVELS.length - 1;
+  const nextLevelIndex = getNextLevelIndex(activeLevelIndex);
+  const hasNextLevel = nextLevelIndex < LEVELS.length;
   const storyPrompt =
     levelConfig.goalType === 'collectTiles' ? (
       <>
@@ -129,6 +138,7 @@ export default function App() {
       window.clearTimeout(ballEntranceTimerRef.current);
       window.clearTimeout(movesCalloutTimerRef.current);
       window.clearTimeout(collectFlyersTimerRef.current);
+      window.clearTimeout(catEffectsTimerRef.current);
       window.clearTimeout(mascotTimerRef.current);
       stopPrimarySounds();
     };
@@ -148,6 +158,8 @@ export default function App() {
     if (!canSwapCells(game.board, target, target)) {
       return;
     }
+
+    initializeGameplayAudio();
 
     if (!selected) {
       setSelected(target);
@@ -240,6 +252,7 @@ export default function App() {
       score: game.score,
       collected: game.collected,
       spawnedEntities: game.spawnedEntities,
+      playerSwapEndpoints: [to, from],
     });
     const spawnedBeforeTimedDrop = resolved.spawnedEntities;
     resolved = spawnTimedDropEntityIfNeeded(resolved, nextMoves);
@@ -306,6 +319,12 @@ export default function App() {
       }
 
       const collection = getCollection(matches, board);
+      const catCreations = isCatPowerGoal
+        ? getCatCreationPlans(matches, board, levelConfig, {
+            swapEndpoints: cascadeIndex === 0 ? initialState.playerSwapEndpoints : null,
+          })
+        : [];
+      const catPowers = isCatPowerGoal ? getCatPowerActivations(matches, board, levelConfig) : { cells: [], clearCells: matches.cells };
       const treatCells =
         isTreatGoal
           ? findAdjacentObjects(matches, board, levelConfig, levelConfig.objective.treatType)
@@ -316,6 +335,8 @@ export default function App() {
           ? treatCells.length
           : isMudGoal
             ? mudCells.length
+            : isCatPowerGoal
+              ? catPowers.cells.length
             : getTargetCollectionCount(collection, objectiveTileSet);
       mudCleanedThisMove = mudCleanedThisMove || (isMudGoal && targetCollectionCount > 0);
       const nextCollected = collected + targetCollectionCount;
@@ -328,6 +349,8 @@ export default function App() {
           ? treatCells
           : isMudGoal
             ? mudCells
+            : isCatPowerGoal
+              ? catPowers.cells
             : getTargetMatchedCells(matches, board, objectiveTileSet);
       score += scoreMatches(matches, levelConfig.scoring, cascadeIndex);
       const matchPower = getMatchPower(matches);
@@ -337,6 +360,9 @@ export default function App() {
         objectiveCount: targetCollectionCount,
         isTreatGoal,
         isMudGoal,
+        isCatPowerGoal,
+        catCreated: catCreations.length > 0,
+        catPowerSound: levelConfig.catPower?.sound,
         completesObjective,
       });
 
@@ -364,11 +390,13 @@ export default function App() {
         showMatchFeedback({ ...reward.feedback, key: `${Date.now()}-${cascadeIndex}` });
       }
 
-      if (reward.sound) {
+      if (reward.sound && reward.sound !== 'cat-power') {
         playPrimarySound(reward.sound);
       }
 
-      const markedBoard = markCells(
+      const creationKeys = new Set(catCreations.map((plan) => `${plan.cell.row}:${plan.cell.col}`));
+      const cellsToMark = catPowers.clearCells.filter((cell) => !creationKeys.has(`${cell.row}:${cell.col}`));
+      let markedBoard = markCells(
         getMarkedObjectiveBoard(board, {
           isTreatGoal,
           isMudGoal,
@@ -376,16 +404,72 @@ export default function App() {
           treatCells,
           mudCells,
         }),
-        matches.cells,
+        cellsToMark,
         'clearing',
         { matchPower },
       );
+
+      for (const cell of catPowers.clearCells) {
+        const activation = catPowers.cells.find((source) => {
+          const special = board[source.row]?.[source.col]?.tile?.special;
+          return special === 'tuxedo-row' ? source.row === cell.row : source.col === cell.col;
+        });
+
+        if (!activation) {
+          continue;
+        }
+
+        const special = board[activation.row][activation.col].tile.special;
+        const powerDirection = special === 'tuxedo-row' ? 'row' : 'column';
+        const powerDistance = powerDirection === 'row'
+          ? Math.abs(cell.col - activation.col)
+          : Math.abs(cell.row - activation.row);
+        markedBoard = markCells(markedBoard, [cell], 'clearing', {
+          matchPower,
+          powerDirection,
+          powerDelay: powerDistance * 34,
+        });
+      }
+
+      const catTiming = levelConfig.catPower?.timing;
+      const catCreationDelay = catCreations.length > 0 ? catTiming?.transformDelay ?? 270 : 0;
+      const catClearDelay = catCreations.length > 0
+        ? catTiming?.creationResolve ?? 680
+        : catPowers.cells.length > 0
+          ? catTiming?.activationResolve ?? 600
+          : levelConfig.timing.clear;
+      const catPhaseStartedAt = performance.now();
+      const getRemainingCatPhaseDelay = () => Math.max(0, catClearDelay - (performance.now() - catPhaseStartedAt));
+
+      if (catPowers.cells.length > 0) {
+        showCatEffects(
+          catPowers.cells.map((cell) => ({
+            kind: 'cat-activate',
+            cell,
+            special: board[cell.row][cell.col].tile.special,
+          })),
+        );
+      }
 
       setGame((current) => ({
         ...current,
         board: markedBoard,
         score,
       }));
+
+      if (catPowers.cells.length > 0) {
+        await nextVisualFrame();
+        playCatPower('cat-activate');
+      }
+
+      if (catCreationDelay > 0) {
+        await sleep(Math.max(0, catCreationDelay - (performance.now() - catPhaseStartedAt)));
+        markedBoard = placeCatTiles(markedBoard, catCreations);
+        setGame((current) => ({ ...current, board: markedBoard }));
+        await nextVisualFrame();
+        showCatEffects(catCreations.map((plan) => ({ kind: 'cat-create', cell: plan.cell, special: plan.special })));
+        playCatPower('cat-create');
+      }
 
       if (targetCollectionCount > 0) {
         if (isTreatGoal) {
@@ -394,23 +478,36 @@ export default function App() {
 
         launchCollectFlyers(targetCells, board, { kind: isMudGoal ? 'mud-clean' : 'collectible' });
 
-        await sleep(isMudGoal ? Math.min(420, levelConfig.timing.clear) : levelConfig.timing.collectFly);
+        const collectionDelay = isCatPowerGoal
+          ? getRemainingCatPhaseDelay()
+          : isMudGoal
+            ? Math.min(420, levelConfig.timing.clear)
+            : levelConfig.timing.collectFly;
+        await sleep(collectionDelay);
         collected = nextCollected;
         setProgressPulseKey(Date.now());
         setGame((current) => ({ ...current, collected }));
-        await sleep(isMudGoal ? 80 : Math.max(0, levelConfig.timing.clear - levelConfig.timing.collectFly));
+        await sleep(isCatPowerGoal ? 0 : isMudGoal ? 80 : Math.max(0, levelConfig.timing.clear - levelConfig.timing.collectFly));
       } else {
-        await sleep(levelConfig.timing.clear);
+        if (isCatPowerGoal) {
+          await sleep(getRemainingCatPhaseDelay());
+        } else if (catCreationDelay === 0) {
+          await sleep(catClearDelay);
+        }
       }
 
-      const clearedBoard = clearCells(
-        getClearedObjectiveBoard(board, {
-          isTreatGoal,
-          isMudGoal,
-          treatCells,
-          mudCells,
-        }),
-        matches.cells,
+      const cellsToClear = catPowers.clearCells.filter((cell) => !creationKeys.has(`${cell.row}:${cell.col}`));
+      const clearedBoard = placeCatTiles(
+        clearCells(
+          getClearedObjectiveBoard(board, {
+            isTreatGoal,
+            isMudGoal,
+            treatCells,
+            mudCells,
+          }),
+          cellsToClear,
+        ),
+        catCreations,
       );
       board = applyGravityAndRefill(clearedBoard, levelConfig, TILE_TYPES);
       if (!reward.suppressFall) {
@@ -723,10 +820,12 @@ export default function App() {
     window.clearTimeout(ballEntranceTimerRef.current);
     window.clearTimeout(movesCalloutTimerRef.current);
     window.clearTimeout(collectFlyersTimerRef.current);
+    window.clearTimeout(catEffectsTimerRef.current);
     setShuffleFeedback(null);
     setBallEntranceFeedback(null);
     setMovesCallout(null);
     setCollectFlyers([]);
+    setCatEffects([]);
   }
 
   async function playVictoryBarks(config) {
@@ -755,7 +854,7 @@ export default function App() {
       return;
     }
 
-    startLevel(activeLevelIndex + 1);
+    startLevel(nextLevelIndex);
   }
 
   function startLevel(levelIndex) {
@@ -798,7 +897,7 @@ export default function App() {
         const boardCell = boardSnapshot[cell.row]?.[cell.col];
         const tile = boardCell?.tile;
         const object = boardCell?.object;
-        const meta = kind === 'entity' ? entityMeta : tile ? tileLookup.get(tile.type) : objectLookup.get(object?.type);
+        const meta = kind === 'entity' ? entityMeta : tile ? getTileMeta(tile, tileLookup, levelConfig) : objectLookup.get(object?.type);
 
         if (!sourceRect || (kind !== 'mud-clean' && !meta)) {
           return null;
@@ -824,6 +923,44 @@ export default function App() {
     window.clearTimeout(collectFlyersTimerRef.current);
     setCollectFlyers(flyers);
     collectFlyersTimerRef.current = window.setTimeout(() => setCollectFlyers([]), levelConfig.timing.collectFly + 180);
+  }
+
+  function showCatEffects(events) {
+    const boardRect = boardRef.current?.getBoundingClientRect();
+
+    if (!boardRect) {
+      return;
+    }
+
+    const effects = events
+      .map((event, index) => {
+        const tileRect = tileRefs.current.get(`${event.cell.row}:${event.cell.col}`)?.getBoundingClientRect();
+
+        if (!tileRect) {
+          return null;
+        }
+
+        const x = ((tileRect.left + tileRect.width / 2 - boardRect.left) / boardRect.width) * 100;
+        const y = ((tileRect.top + tileRect.height / 2 - boardRect.top) / boardRect.height) * 100;
+
+        return {
+          ...event,
+          id: `${event.kind}-${event.cell.row}-${event.cell.col}-${Date.now()}-${index}`,
+          x,
+          y,
+          labelBelow: y < 22,
+          labelOffset: ((Math.max(12, Math.min(88, x)) - x) / 100) * boardRect.width + (index - (events.length - 1) / 2) * 18,
+        };
+      })
+      .filter(Boolean);
+
+    if (effects.length === 0) {
+      return;
+    }
+
+    window.clearTimeout(catEffectsTimerRef.current);
+    setCatEffects((current) => [...current, ...effects]);
+    catEffectsTimerRef.current = window.setTimeout(() => setCatEffects([]), 1200);
   }
 
   return (
@@ -866,28 +1003,47 @@ export default function App() {
           <div className="level-card">
             <p className="level-kicker">Level {levelConfig.level}</p>
             <h2>{levelConfig.name}</h2>
-            <p>
-              <strong>{levelConfig.story.headline}</strong>
-            </p>
-            <p>
-              {storyPrompt}
-            </p>
-            <p className="level-tip">
-              <span aria-hidden="true">💡</span>
-              <span>
-                <strong>{levelConfig.story.favoriteLead}</strong> {levelConfig.story.favoriteDetail}
-              </span>
-            </p>
+            {isCatPowerGoal ? (
+              <>
+                <p>
+                  <strong>{levelConfig.story.prompt}</strong>
+                </p>
+                <p>
+                  <strong>{levelConfig.story.followUp}</strong>
+                </p>
+                <div className="cat-power-rules" aria-label="Cat Power rules">
+                  {levelConfig.story.catRules.map((rule) => (
+                    <p className="cat-power-rule" key={rule.text}>
+                      <span aria-hidden="true">{rule.icon}</span>
+                      <strong>{rule.label}</strong> {rule.text}
+                    </p>
+                  ))}
+                </div>
+              </>
+            ) : (
+              <>
+                <p>
+                  <strong>{levelConfig.story.headline}</strong>
+                </p>
+                <p>{storyPrompt}</p>
+                <p className="level-tip">
+                  <span aria-hidden="true">💡</span>
+                  <span>
+                    <strong>{levelConfig.story.favoriteLead}</strong> {levelConfig.story.favoriteDetail}
+                  </span>
+                </p>
+              </>
+            )}
           </div>
 
           <div className="objective">
             <div className="objective-heading">
               <span className="panel-label">
                 <PawPrint size={16} aria-hidden="true" />
-                {isTreatGoal || isMudGoal || isDropGoal ? 'Goal' : "Cola's Favorites"}
+                {isTreatGoal || isMudGoal || isDropGoal || isCatPowerGoal ? 'Goal' : "Cola's Favorites"}
               </span>
             </div>
-            <div className={`goal-progress ${isTreatGoal || isMudGoal || isDropGoal ? 'treat-goal-progress' : ''}`} ref={goalTargetRef}>
+            <div className={`goal-progress ${isTreatGoal || isMudGoal || isDropGoal || isCatPowerGoal ? 'treat-goal-progress' : ''}`} ref={goalTargetRef}>
               {isTreatGoal ? (
                 objectiveObject && (
                   <div className="goal-tiles" aria-label="Target treat">
@@ -912,6 +1068,15 @@ export default function App() {
                     </div>
                   </div>
                 )
+              ) : isCatPowerGoal ? (
+                <div className="goal-tiles cat-power-goal-icons" aria-label="Any Tuxedo or Tabby Cat Power counts">
+                  <div className="goal-tile treat-goal-tile cat-power-goal-icon">
+                    <img src={levelConfig.catPower.goalAssets.tuxedo} alt="Tuxedo Cat Power" />
+                  </div>
+                  <div className="goal-tile treat-goal-tile cat-power-goal-icon">
+                    <img src={levelConfig.catPower.goalAssets.tabby} alt="Tabby Cat Power" />
+                  </div>
+                </div>
               ) : (
                 <div className="goal-tiles" aria-label="Target Cola tiles">
                   {objectiveTiles.map((tile) => (
@@ -959,7 +1124,7 @@ export default function App() {
               {ballEntranceFeedback.text}
             </div>
           )}
-          <div className="board" style={{ '--board-size': levelConfig.width }}>
+          <div className="board" ref={boardRef} style={{ '--board-size': levelConfig.width }}>
             {game.board.map((row, rowIndex) =>
               row.map((cell, colIndex) => {
                 const tile = cell.tile;
@@ -1013,6 +1178,8 @@ export default function App() {
                       isSelected ? 'selected' : ''
                     } ${tile.state} ${
                       tile.matchPower ? `match-${tile.matchPower}` : ''
+                    } ${tile.special ? `special-${tile.special}` : ''} ${
+                      tile.powerDirection ? `power-${tile.powerDirection}` : ''
                     }`}
                     key={tile.key}
                     ref={(node) => {
@@ -1026,7 +1193,10 @@ export default function App() {
                     type="button"
                     onClick={() => handleTileClick(rowIndex, colIndex)}
                     disabled={isEntityTile || busy || game.status !== 'playing'}
-                    style={{ '--tile-color': meta.color }}
+                    style={{
+                      '--tile-color': meta.color,
+                      '--power-delay': `${tile.powerDelay ?? 0}ms`,
+                    }}
                     aria-label={`${meta.label} ${isEntityTile ? 'at' : 'tile at'} row ${rowIndex + 1}, column ${colIndex + 1}${
                       terrain?.type === 'mud' ? ', on mud' : ''
                     }`}
@@ -1039,6 +1209,7 @@ export default function App() {
                       </span>
                     )}
                     <img src={meta.image} alt="" draggable="false" />
+                    {tile.powerDirection && <span className={`cat-power-flash ${tile.powerDirection}`} aria-hidden="true" />}
                     {tile.state === 'clearing' && (
                       <span className="paw-burst" aria-hidden="true">
                         <span />
@@ -1052,6 +1223,34 @@ export default function App() {
                 );
               }),
             )}
+            <div className="cat-effects" aria-hidden="true">
+              {catEffects.map((effect) => (
+                <div
+                  className={`cat-effect ${effect.kind} ${effect.special === 'tuxedo-row' ? 'row' : 'column'} ${
+                    effect.labelBelow ? 'label-below' : 'label-above'
+                  }`}
+                  key={effect.id}
+                  style={{
+                    '--effect-x': `${effect.x}%`,
+                    '--effect-y': `${effect.y}%`,
+                    '--label-offset': `${effect.labelOffset}px`,
+                  }}
+                >
+                  <span className="cat-effect-glow" />
+                  <span className="cat-effect-particles">
+                    {Array.from({ length: 5 }, (_, index) => <span key={index} />)}
+                  </span>
+                  {effect.kind === 'cat-activate' && <span className="cat-effect-sweep" />}
+                  <span className="cat-effect-label">
+                    {effect.kind === 'cat-create'
+                      ? 'POWER PAL! 🐾'
+                      : effect.special === 'tuxedo-row'
+                        ? 'ROW POWER! ↔'
+                        : 'COLUMN POWER! ↕'}
+                  </span>
+                </div>
+              ))}
+            </div>
           </div>
         </section>
       </section>
@@ -1233,6 +1432,10 @@ function getObjectiveNoun(levelConfig) {
     return 'balls';
   }
 
+  if (levelConfig.goalType === 'activateCatPowers') {
+    return 'Cat Powers';
+  }
+
   return 'Colas';
 }
 
@@ -1269,7 +1472,23 @@ function getTileMeta(tile, tileLookup, levelConfig) {
     return levelConfig.objective.asset;
   }
 
-  return tileLookup.get(tile.type);
+  const base = tileLookup.get(tile.type);
+
+  if (!tile?.special || !base?.catColor) {
+    return base;
+  }
+
+  const image = levelConfig.catPower?.assets?.[tile.special]?.[base.catColor];
+
+  if (!image) {
+    return base;
+  }
+
+  return {
+    ...base,
+    image,
+    label: `${base.label} ${tile.special === 'tuxedo-row' ? 'Tuxedo Cat, clears row' : 'Tabby Cat, clears column'}`,
+  };
 }
 
 function getResultArtwork(levelConfig, status) {

@@ -1,4 +1,14 @@
-export function getPrimaryReward({ cascadeIndex, matchPower, objectiveCount, isTreatGoal, isMudGoal, completesObjective }) {
+export function getPrimaryReward({
+  cascadeIndex,
+  matchPower,
+  objectiveCount,
+  isTreatGoal,
+  isMudGoal,
+  isCatPowerGoal,
+  catCreated,
+  catPowerSound,
+  completesObjective,
+}) {
   if (completesObjective) {
     return {
       priority: 'victory',
@@ -20,17 +30,17 @@ export function getPrimaryReward({ cascadeIndex, matchPower, objectiveCount, isT
   if (objectiveCount > 0) {
     return {
       priority: 'objective',
-      sound: 'goal',
-      feedback: getObjectiveFeedback({ objectiveCount, isTreatGoal, isMudGoal }),
+      sound: isCatPowerGoal ? catPowerSound ?? 'goal' : 'goal',
+      feedback: getObjectiveFeedback({ objectiveCount, isTreatGoal, isMudGoal, isCatPowerGoal }),
       suppressFall: false,
     };
   }
 
-  if (matchPower >= 4) {
+  if (catCreated || matchPower >= 4) {
     return {
       priority: 'special',
-      sound: 'special',
-      feedback: getMatchFeedback(matchPower),
+      sound: catCreated ? catPowerSound ?? 'special' : 'special',
+      feedback: catCreated ? { text: 'POWER PAL!', tone: 'cat-power' } : getMatchFeedback(matchPower),
       suppressFall: false,
     };
   }
@@ -79,7 +89,11 @@ export function getMatchFeedback(matchPower) {
   return null;
 }
 
-export function getObjectiveFeedback({ objectiveCount, isTreatGoal, isMudGoal }) {
+export function getObjectiveFeedback({ objectiveCount, isTreatGoal, isMudGoal, isCatPowerGoal }) {
+  if (isCatPowerGoal) {
+    return { text: 'CAT POWER!', tone: 'cat-power' };
+  }
+
   if (isTreatGoal) {
     return objectiveCount > 1
       ? { text: 'TREAT TIME!', tone: 'pawsome' }
