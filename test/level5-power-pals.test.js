@@ -10,6 +10,7 @@ import {
   getCatPowerActivations,
   makeInitialBoard,
   placeCatTiles,
+  swapTiles,
 } from '../src/game/match3.js';
 import { getPrimaryReward } from '../src/game/rewards.js';
 
@@ -97,7 +98,14 @@ test('a cascade-created exact-four uses the deterministic center fallback', () =
 
   const vertical = makeBoard();
   setRun(vertical, [1, 2, 3, 4].map((row) => ({ row, col: 5 })), types[4]);
-  assert.deepEqual(getCatCreationPlans(findMatches(vertical, level5), vertical, level5), [
+  vertical[2][4].tile = tile(types[2], '2-4');
+  const verticalMatches = findMatches(vertical, level5);
+  // The unrelated green three is allowed; the orange four must not intersect it or another run.
+  assert.deepEqual(verticalMatches.groups, [
+    { type: types[0], cells: [4, 5, 6].map((col) => ({ row: 0, col })) },
+    { type: types[4], cells: [1, 2, 3, 4].map((row) => ({ row, col: 5 })) },
+  ]);
+  assert.deepEqual(getCatCreationPlans(verticalMatches, vertical, level5), [
     { cell: { row: 2, col: 5 }, type: types[4], special: 'tuxedo-row', orientation: 'vertical' },
   ]);
 });
@@ -125,8 +133,14 @@ test('a player-created exact-five uses the swap destination instead of the cente
 test('a player-created vertical exact-five uses the swap destination instead of the center', () => {
   const board = makeBoard();
   setRun(board, [1, 2, 3, 4, 5].map((row) => ({ row, col: 6 })), types[5]);
+  board[1][5].tile = tile(types[2], '1-5');
+  board[4][5].tile = tile(types[2], '4-5');
+  const matches = findMatches(board, level5);
+  assert.deepEqual(matches.groups, [
+    { type: types[5], cells: [1, 2, 3, 4, 5].map((row) => ({ row, col: 6 })) },
+  ]);
 
-  const plans = getCatCreationPlans(findMatches(board, level5), board, level5, {
+  const plans = getCatCreationPlans(matches, board, level5, {
     swapEndpoints: [{ row: 5, col: 6 }, { row: 5, col: 5 }],
   });
 
@@ -147,8 +161,13 @@ test('the tile moving from to to from creates a horizontal exact-four at from', 
 test('the tile moving from to to from creates a vertical exact-four at from', () => {
   const board = makeBoard();
   setRun(board, [1, 2, 3, 4].map((row) => ({ row, col: 2 })), types[1]);
+  board[2][1].tile = tile(types[2], '2-1');
+  const matches = findMatches(board, level5);
+  assert.deepEqual(matches.groups, [
+    { type: types[1], cells: [1, 2, 3, 4].map((row) => ({ row, col: 2 })) },
+  ]);
 
-  const plans = getCatCreationPlans(findMatches(board, level5), board, level5, {
+  const plans = getCatCreationPlans(matches, board, level5, {
     swapEndpoints: [{ row: 5, col: 2 }, { row: 4, col: 2 }],
   });
 
@@ -176,6 +195,52 @@ test('the tile moving from to to from creates a vertical exact-five at from', ()
 
   assert.deepEqual(plans, [{ cell: { row: 5, col: 3 }, type: types[3], special: 'tuxedo-row', orientation: 'vertical' }]);
 });
+
+for (const orientation of ['horizontal', 'vertical']) {
+  for (const length of [4, 5]) {
+    for (const completesAt of ['from', 'to']) {
+      test(`an adjacent swap creates a ${orientation} exact-${length} Cat at ${completesAt}`, () => {
+        // A deterministic background with no matches; leave a central gap so even
+        // a five-match has no pre-existing three before the swap.
+        const board = Array.from({ length: 8 }, (_, row) =>
+          Array.from({ length: 8 }, (_, col) => ({
+            tile: tile(types[(row + col) % types.length], `${row}-${col}`),
+            object: null,
+            terrain: null,
+          })),
+        );
+        const cells = Array.from({ length }, (_, index) =>
+          orientation === 'horizontal' ? { row: 3, col: index + 1 } : { row: index + 1, col: 3 },
+        );
+        for (const cell of cells) {
+          board[cell.row][cell.col].tile.type = types[0];
+        }
+        const destination = cells[length === 5 ? 2 : 1];
+        const incoming = orientation === 'horizontal'
+          ? { row: 2, col: destination.col }
+          : { row: destination.row, col: 2 };
+        board[destination.row][destination.col].tile.type = types[1];
+        board[incoming.row][incoming.col].tile.type = types[0];
+        const from = completesAt === 'from' ? destination : incoming;
+        const to = completesAt === 'to' ? destination : incoming;
+        const incomingKey = board[incoming.row][incoming.col].tile.key;
+
+        assert.equal(Math.abs(from.row - to.row) + Math.abs(from.col - to.col), 1);
+        assert.deepEqual(findMatches(board, level5).groups, []);
+        const swapped = swapTiles(board, from, to);
+        assert.equal(swapped[destination.row][destination.col].tile.key, incomingKey);
+        const matches = findMatches(swapped, level5);
+        assert.deepEqual(matches.groups, [{ type: types[0], cells }]);
+        const plans = getCatCreationPlans(matches, swapped, level5, { swapEndpoints: [to, from] });
+        const special = orientation === 'horizontal' ? 'tabby-column' : 'tuxedo-row';
+        assert.deepEqual(plans, [{ cell: destination, type: types[0], special, orientation }]);
+        const withCat = placeCatTiles(swapped, plans);
+        assert.equal(withCat[destination.row][destination.col].tile.special, special);
+        assert.equal(withCat[destination.row][destination.col].tile.type, types[0]);
+      });
+    }
+  }
+}
 
 test('a player-created multi-match ignores unrelated groups but keeps groups at both endpoints', () => {
   const board = makeBoard();
